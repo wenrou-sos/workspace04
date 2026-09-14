@@ -2,7 +2,7 @@
   <div>
     <div class="page-header">
       <h2>温湿度监测</h2>
-      <el-button type="primary" :icon="Plus" @click="openDialog()">录入检测记录</el-button>
+      <el-button v-if="auth.canWrite()" type="primary" :icon="Plus" @click="openDialog()">录入检测记录</el-button>
     </div>
 
     <el-row :gutter="12" class="mb16">
@@ -87,8 +87,8 @@
     <el-dialog v-model="dialogVisible" title="录入检测记录" width="560px">
       <el-form ref="formRef" :model="form" :rules="rules" label-width="120px">
         <el-form-item label="仓房" prop="granary">
-          <el-select v-model="form.granary" style="width: 100%">
-            <el-option v-for="g in granaries" :key="g.id" :label="`${g.code} ${g.name}`" :value="g.id" />
+          <el-select v-model="form.granary" style="width: 100%" :placeholder="selectableGranaries.length ? '请选择仓房' : '您名下暂无管辖仓房'">
+            <el-option v-for="g in selectableGranaries" :key="g.id" :label="`${g.code} ${g.name}`" :value="g.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="检测时间" prop="recorded_at">
@@ -131,7 +131,7 @@
           </el-col>
         </el-row>
         <el-form-item label="检测人">
-          <el-input v-model="form.inspector" />
+          <el-input :model-value="auth.displayName" disabled />
         </el-form-item>
         <el-form-item label="情况说明">
           <el-input v-model="form.note" type="textarea" :rows="2" />
@@ -157,7 +157,9 @@ import { ElMessage } from 'element-plus'
 import { Plus, Search } from '@element-plus/icons-vue'
 import { granaryApi, monitorApi } from '@/api'
 import { ALERT_LEVEL, findType } from '@/utils/constants'
+import { useAuthStore } from '@/stores/auth'
 
+const auth = useAuthStore()
 const list = ref([])
 const granaries = ref([])
 const loading = ref(false)
@@ -223,6 +225,12 @@ const emptyForm = () => ({
   outside_temp: 20, outside_humidity: 60,
 })
 const form = reactive(emptyForm())
+
+// 保管员只能给自己管辖仓房录入
+const selectableGranaries = computed(() =>
+  granaries.value.filter((g) => auth.canAccessGranary(g.id))
+)
+
 const rules = {
   granary: [{ required: true, message: '请选择仓房', trigger: 'change' }],
   recorded_at: [{ required: true, message: '请选择时间', trigger: 'change' }],

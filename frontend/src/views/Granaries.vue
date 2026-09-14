@@ -2,7 +2,7 @@
   <div>
     <div class="page-header">
       <h2>仓房管理</h2>
-      <el-button type="primary" :icon="Plus" @click="openDialog()">新增仓房</el-button>
+      <el-button v-if="auth.isManager" type="primary" :icon="Plus" @click="openDialog()">新增仓房</el-button>
     </div>
 
     <el-card>
@@ -59,8 +59,8 @@
         <el-table-column label="操作" width="160" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="showDetail(row)">粮情</el-button>
-            <el-button link type="primary" size="small" @click="openDialog(row)">编辑</el-button>
-            <el-popconfirm title="确认删除该仓房？" @confirm="remove(row)">
+            <el-button v-if="auth.isManager" link type="primary" size="small" @click="openDialog(row)">编辑</el-button>
+            <el-popconfirm v-if="auth.canApproveOrDelete()" title="确认删除该仓房？" @confirm="remove(row)">
               <template #reference>
                 <el-button link type="danger" size="small">删除</el-button>
               </template>
@@ -182,7 +182,9 @@ import { ElMessage } from 'element-plus'
 import { Plus, Search } from '@element-plus/icons-vue'
 import { batchApi, granaryApi } from '@/api'
 import { GRANARY_STATUS, GRANARY_TYPE, findType } from '@/utils/constants'
+import { useAuthStore } from '@/stores/auth'
 
+const auth = useAuthStore()
 const list = ref([])
 const loading = ref(false)
 const filters = reactive({ search: '', status: '', granary_type: '' })

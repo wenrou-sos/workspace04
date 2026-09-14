@@ -2,7 +2,7 @@
   <div>
     <div class="page-header">
       <h2>库存盘点</h2>
-      <el-button type="primary" :icon="Plus" @click="openDialog()">新建盘点单</el-button>
+      <el-button v-if="auth.isManager" type="primary" :icon="Plus" @click="openDialog()">新建盘点单</el-button>
     </div>
 
     <el-row :gutter="12" class="mb16">
@@ -50,7 +50,7 @@
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="showDetail(row)">盘点明细</el-button>
             <el-popconfirm
-              v-if="row.status === 'draft'"
+              v-if="auth.canApproveOrDelete() && row.status === 'draft'"
               title="确认删除该盘点单？"
               @confirm="remove(row)"
             >
@@ -75,8 +75,8 @@
         <el-form-item label="盘点日期" prop="plan_date">
           <el-date-picker v-model="form.plan_date" type="date" value-format="YYYY-MM-DD" style="width: 100%" />
         </el-form-item>
-        <el-form-item label="负责人" prop="leader">
-          <el-input v-model="form.leader" />
+        <el-form-item label="负责人">
+          <el-input :model-value="auth.displayName" disabled />
         </el-form-item>
         <el-form-item label="参加人员">
           <el-input v-model="form.members" />
@@ -115,7 +115,7 @@
           <el-button
             type="primary"
             :icon="Refresh"
-            :disabled="detail.status !== 'draft'"
+            :disabled="detail.status !== 'draft' || !auth.canWrite()"
             :loading="generating"
             @click="generateItems"
           >
@@ -124,11 +124,14 @@
           <el-button
             type="success"
             :icon="Check"
-            :disabled="detail.status !== 'counting'"
+            :disabled="detail.status !== 'counting' || !auth.canApproveOrDelete()"
             @click="finish"
           >
             完成盘点并调账
           </el-button>
+          <el-tag v-if="!auth.canApproveOrDelete()" size="small" type="info">
+            保管员录入实盘，调账由库管主任完成
+          </el-tag>
           <span class="tip" v-if="detail.status === 'draft'">先生成明细，再逐仓录入实盘数量</span>
           <span class="tip" v-else-if="detail.status === 'counting'">录入全部实盘数量后完成盘点</span>
           <span class="tip done" v-else>盘点已结束，批次结存已按实盘调整</span>
@@ -142,7 +145,7 @@
           <el-table-column label="实盘数量(吨)" width="150">
             <template #default="{ row }">
               <el-input-number
-                v-if="detail.status === 'counting'"
+                v-if="detail.status === 'counting' && auth.canWrite()"
                 :model-value="row.actual_quantity"
                 :min="0"
                 :precision="2"
@@ -166,7 +169,7 @@
           <el-table-column label="差异原因" min-width="160">
             <template #default="{ row }">
               <el-input
-                v-if="detail.status === 'counting'"
+                v-if="detail.status === 'counting' && auth.canWrite()"
                 :model-value="row.reason"
                 size="small"
                 @change="(v) => updateReason(row, v)"
@@ -187,7 +190,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Check } from '@element-plus/icons-vue'
 import { stocktakeApi, stocktakeItemApi } from '@/api'
 import { STOCKTAKE_STATUS, findType } from '@/utils/constants'
+import { useAuthStore } from '@/stores/auth'
 
+const auth = useAuthStore()
 const list = ref([])
 const loading = ref(false)
 
@@ -233,7 +238,6 @@ const form = reactive({
   stocktake_no: genNo(),
   name: '',
   plan_date: today(),
-  leader: '',
   members: '',
   remark: '',
 })
@@ -241,12 +245,11 @@ const rules = {
   stocktake_no: [{ required: true, message: '请输入盘点单号', trigger: 'blur' }],
   name: [{ required: true, message: '请输入盘点名称', trigger: 'blur' }],
   plan_date: [{ required: true, message: '请选择日期', trigger: 'change' }],
-  leader: [{ required: true, message: '请输入负责人', trigger: 'blur' }],
 }
 function openDialog() {
   Object.assign(form, {
     stocktake_no: genNo(), name: '', plan_date: today(),
-    leader: '', members: '', remark: '',
+    members: '', remark: '',
   })
   dialogVisible.value = true
 }

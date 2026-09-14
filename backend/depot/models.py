@@ -1,14 +1,19 @@
 """粮食储备库核心数据模型。
 
-覆盖六大业务域：
+覆盖七大业务域：
+- 账号与岗位（UserProfile：管理员/主任/保管员/只读用户，保管员按仓房授权）
 - 仓房管理（Granary）
 - 粮情/库存批次（GrainBatch）
 - 温湿度监测（MonitorRecord）
 - 出入库记录（StockRecord，联动结存数量）
 - 熏蒸作业（FumigationTask）
 - 库存盘点（Stocktake / StocktakeItem）
+- 操作审计（OperationLog，所有关键动作追到人）
 """
+from django.conf import settings
 from django.db import models, transaction
+from django.db.models.signals import post_save
+from django.dispatch import receiver
 from django.utils import timezone
 
 
@@ -20,6 +25,108 @@ class TimeStampedModel(models.Model):
 
     class Meta:
         abstract = True
+
+
+class UserProfile(models.Model):
+    """用户岗位档案：与 Django 账号一对一。"""
+
+    class Role(models.TextChoices):
+        ADMIN = "admin", "系统管理员"
+        DIRECTOR = "director", "库管主任"
+        KEEPER = "keeper", "保管员"
+        VIEWER = "viewer", "只读用户"
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile",
+        verbose_name="系统账号",
+    )
+    role = models.CharField("岗位角色", max_length=20, choices=Role.choices, default=Role.VIEWER)
+    display_name = models.CharField("姓名", max_length=30, blank=True)
+    phone = models.CharField("联系电话", max_length=20, blank=True)
+    # 保管员可管辖的仓房（主任/管理员默认全部，viewer 只读全部）
+    granaries = models.ManyToManyField(
+        "Granary", verbose_name="管辖仓房", blank=True, related_name="keepers"
+    )
+
+    class Meta:
+        verbose_name = "用户岗位"
+        verbose_name_plural = "用户岗位"
+        db_table = "depot_user_profile"
+
+    def __str__(self):
+        return f"{self.display_name or self.user.username}（{self.get_role_display()}）"
+
+    @property
+    def role_level(self):
+        return {
+            self.Role.ADMIN: 4,
+            self.Role.DIRECTOR: 3,
+            self.Role.KEEPER: 2,
+            self.Role.VIEWER: 1,
+        }.get(self.role, 0)
+
+    def can_access_granary(self, granary):
+        """判断该用户是否有权访问指定仓房。"""
+        if self.role in {self.Role.ADMIN, self.Role.DIRECTOR, self.Role.VIEWER}:
+            return True
+        if granary is None:
+            return False
+        return self.granaries.filter(pk=granary.pk).exists()
+
+    def scoped_granary_ids(self):
+        """该用户可见的仓房 ID 集合；None 表示不限制（全仓）。"""
+        if self.role in {self.Role.ADMIN, self.Role.DIRECTOR, self.Role.VIEWER}:
+            return None
+        return set(self.granaries.values_list("pk", flat=True))
+
+
+@receiver(post_save, sender=settings.AUTH_USER_MODEL)
+def ensure_profile(sender, instance, created, **kwargs):
+    """新建账号时自动创建岗位档案；超级用户默认管理员。"""
+    if created and not hasattr(instance, "profile"):
+        UserProfile.objects.create(
+            user=instance,
+            role=UserProfile.Role.ADMIN if instance.is_superuser else UserProfile.Role.VIEWER,
+            display_name=instance.username,
+        )
+
+
+class OperationLog(models.Model):
+    """关键业务操作审计日志，全部操作可追溯到人。"""
+
+    class Action(models.TextChoices):
+        LOGIN = "login", "登录"
+        LOGIN_FAIL = "login_fail", "登录失败"
+        LOGOUT = "logout", "登出"
+        CREATE = "create", "新增"
+        UPDATE = "update", "修改"
+        DELETE = "delete", "删除"
+        STOCK_IN = "stock_in", "入库"
+        STOCK_OUT = "stock_out", "出库"
+        FUMIGATION_ADVANCE = "fumigation_advance", "熏蒸状态推进"
+        STOCKTAKE_GENERATE = "stocktake_generate", "生成盘点明细"
+        STOCKTAKE_ADJUST = "stocktake_adjust", "盘点调账"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="operation_logs", verbose_name="操作人",
+    )
+    actor_name = models.CharField("操作人姓名", max_length=30, blank=True)
+    action = models.CharField("动作", max_length=30, choices=Action.choices)
+    module = models.CharField("业务模块", max_length=30)
+    target = models.CharField("操作对象", max_length=200, blank=True)
+    detail = models.TextField("操作详情", blank=True)
+    ip = models.GenericIPAddressField("IP 地址", null=True, blank=True)
+    created_at = models.DateTimeField("操作时间", auto_now_add=True)
+
+    class Meta:
+        verbose_name = "操作日志"
+        verbose_name_plural = "操作日志"
+        ordering = ["-created_at"]
+        db_table = "depot_operation_log"
+
+    def __str__(self):
+        return f"{self.actor_name} {self.get_action_display()} {self.target} @ {self.created_at:%Y-%m-%d %H:%M}"
 
 
 class Granary(TimeStampedModel):
@@ -49,6 +156,10 @@ class Granary(TimeStampedModel):
     temperature_threshold = models.DecimalField("温度告警阈值(℃)", max_digits=5, decimal_places=1, default=25)
     humidity_threshold = models.DecimalField("湿度告警阈值(%)", max_digits=5, decimal_places=1, default=70)
     remark = models.TextField("备注", blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="created_granaries", verbose_name="建档人",
+    )
 
     class Meta:
         verbose_name = "仓房"
@@ -114,6 +225,10 @@ class GrainBatch(TimeStampedModel):
     moisture = models.DecimalField("水分(%)", max_digits=5, decimal_places=2, default=0)
     impurity = models.DecimalField("杂质(%)", max_digits=5, decimal_places=2, default=0)
     remark = models.TextField("备注", blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="created_batches", verbose_name="登记人",
+    )
 
     class Meta:
         verbose_name = "粮油库存批次"
@@ -148,6 +263,10 @@ class MonitorRecord(TimeStampedModel):
     alert_level = models.CharField("告警级别", max_length=10, choices=AlertLevel.choices, default=AlertLevel.NORMAL)
     inspector = models.CharField("检测人", max_length=30, blank=True)
     note = models.CharField("情况说明", max_length=200, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="created_monitors", verbose_name="录入人",
+    )
 
     class Meta:
         verbose_name = "温湿度检测记录"
@@ -210,6 +329,10 @@ class StockRecord(TimeStampedModel):
     operator = models.CharField("经办人", max_length=30)
     occurred_at = models.DateTimeField("出入库时间", default=timezone.now)
     remark = models.CharField("备注", max_length=200, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="created_stock_records", verbose_name="制单人",
+    )
 
     class Meta:
         verbose_name = "出入库记录"
@@ -312,6 +435,10 @@ class FumigationTask(TimeStampedModel):
     effect = models.CharField("熏蒸效果", max_length=200, blank=True)
     safety_note = models.TextField("安全措施", blank=True)
     remark = models.TextField("备注", blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="created_fumigations", verbose_name="安排人",
+    )
 
     class Meta:
         verbose_name = "熏蒸作业"
@@ -351,6 +478,10 @@ class Stocktake(TimeStampedModel):
     members = models.CharField("参加人员", max_length=200, blank=True)
     status = models.CharField("状态", max_length=12, choices=Status.choices, default=Status.DRAFT)
     remark = models.TextField("备注", blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="created_stocktakes", verbose_name="创建人",
+    )
 
     class Meta:
         verbose_name = "库存盘点单"

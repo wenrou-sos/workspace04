@@ -2,7 +2,7 @@
   <div>
     <div class="page-header">
       <h2>出入库记录</h2>
-      <el-button type="primary" :icon="Plus" @click="openDialog()">新增出入库单</el-button>
+      <el-button v-if="auth.canWrite()" type="primary" :icon="Plus" @click="openDialog()">新增出入库单</el-button>
     </div>
 
     <el-row :gutter="12" class="mb16">
@@ -122,7 +122,7 @@
           <el-col :span="12">
             <el-form-item label="仓房" prop="granary">
               <el-select v-model="form.granary" style="width: 100%" @change="loadBatches">
-                <el-option v-for="g in granaries" :key="g.id" :label="`${g.code} ${g.name}`" :value="g.id" />
+                <el-option v-for="g in selectableGranaries" :key="g.id" :label="`${g.code} ${g.name}`" :value="g.id" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -154,8 +154,8 @@
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="经办人" prop="operator">
-              <el-input v-model="form.operator" />
+            <el-form-item label="经办人">
+              <el-input :model-value="auth.displayName" disabled />
             </el-form-item>
           </el-col>
           <el-col :span="24">
@@ -196,7 +196,9 @@ import { ElMessage } from 'element-plus'
 import { Plus, Search } from '@element-plus/icons-vue'
 import { batchApi, granaryApi, stockApi } from '@/api'
 import { BIZ_TYPE, DIRECTION, findType } from '@/utils/constants'
+import { useAuthStore } from '@/stores/auth'
 
+const auth = useAuthStore()
 const list = ref([])
 const granaries = ref([])
 const batches = ref([])
@@ -275,8 +277,11 @@ const rules = {
   granary: [{ required: true, message: '请选择仓房', trigger: 'change' }],
   batch: [{ required: true, message: '请选择批次', trigger: 'change' }],
   quantity: [{ required: true, message: '请输入数量', trigger: 'blur' }],
-  operator: [{ required: true, message: '请输入经办人', trigger: 'blur' }],
 }
+
+const selectableGranaries = computed(() =>
+  granaries.value.filter((g) => auth.canAccessGranary(g.id))
+)
 
 const IN_BIZ = ['purchase', 'transfer_in', 'return']
 const OUT_BIZ = ['sale', 'transfer_out', 'loss', 'process']

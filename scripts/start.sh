@@ -12,6 +12,12 @@ PYBIN="${PYTHON:-python3}"
   exit 1
 }
 
+api_alive() {
+  # 需认证接口未登录返回 401/403，同样说明 Django 已在服务
+  code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/dashboard/ 2>/dev/null)
+  case "$code" in 200|401|403) return 0;; *) return 1;; esac
+}
+
 bash "$DIR/start-db.sh"
 
 cd "$ROOT/backend"
@@ -29,15 +35,15 @@ if [ "$COUNT" = "0" ]; then
   "$PYBIN" manage.py seed_demo
 fi
 
-if curl -sf http://localhost:8000/api/ >/dev/null 2>&1; then
+if api_alive; then
   echo "Django API 已在运行"
 else
   nohup "$PYBIN" manage.py runserver 0.0.0.0:8000 >/tmp/django.log 2>&1 &
   for i in $(seq 1 15); do
-    curl -sf http://localhost:8000/api/ >/dev/null 2>&1 && break
+    api_alive && break
     sleep 1
   done
-  if curl -sf http://localhost:8000/api/ >/dev/null 2>&1; then
+  if api_alive; then
     echo "Django API 已启动 → http://localhost:8000 （日志 /tmp/django.log）"
   else
     echo "Django API 启动失败，最后 20 行日志：" >&2

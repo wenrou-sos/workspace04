@@ -2,7 +2,7 @@
   <div>
     <div class="page-header">
       <h2>库存粮情</h2>
-      <el-button type="primary" :icon="Plus" @click="openDialog()">登记批次</el-button>
+      <el-button v-if="auth.canWrite()" type="primary" :icon="Plus" @click="openDialog()">登记批次</el-button>
     </div>
 
     <el-row :gutter="12" class="mb16">
@@ -67,8 +67,8 @@
         <el-table-column prop="stored_at" label="入库日期" width="110" />
         <el-table-column label="操作" width="100" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="openDialog(row)">编辑</el-button>
-            <el-popconfirm title="确认删除该批次？" @confirm="remove(row)">
+            <el-button v-if="auth.canWrite()" link type="primary" size="small" @click="openDialog(row)">编辑</el-button>
+            <el-popconfirm v-if="auth.canApproveOrDelete()" title="确认删除该批次？" @confirm="remove(row)">
               <template #reference>
                 <el-button link type="danger" size="small">删除</el-button>
               </template>
@@ -89,7 +89,7 @@
           <el-col :span="12">
             <el-form-item label="所在仓房" prop="granary">
               <el-select v-model="form.granary" style="width: 100%">
-                <el-option v-for="g in granaries" :key="g.id" :label="`${g.code} ${g.name}`" :value="g.id" />
+                <el-option v-for="g in selectableGranaries" :key="g.id" :label="`${g.code} ${g.name}`" :value="g.id" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -158,7 +158,9 @@ import { ElMessage } from 'element-plus'
 import { Plus, Search } from '@element-plus/icons-vue'
 import { batchApi, granaryApi } from '@/api'
 import { GRADE, GRAIN_KIND } from '@/utils/constants'
+import { useAuthStore } from '@/stores/auth'
 
+const auth = useAuthStore()
 const list = ref([])
 const granaries = ref([])
 const loading = ref(false)
@@ -175,6 +177,11 @@ const stats = computed(() => {
     { label: '库存货值（约）', value: `${(value / 10000).toFixed(1)} 万元` },
   ]
 })
+
+// 保管员只能登记自己管辖仓房的批次
+const selectableGranaries = computed(() =>
+  granaries.value.filter((g) => auth.canAccessGranary(g.id))
+)
 
 async function loadData() {
   loading.value = true

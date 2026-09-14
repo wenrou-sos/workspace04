@@ -5,9 +5,11 @@ from .models import (
     GrainBatch,
     Granary,
     MonitorRecord,
+    OperationLog,
     StockRecord,
     Stocktake,
     StocktakeItem,
+    UserProfile,
 )
 
 
@@ -16,10 +18,12 @@ class GranarySerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source="get_status_display", read_only=True)
     current_stock = serializers.SerializerMethodField()
     utilization = serializers.SerializerMethodField()
+    created_by_name = serializers.CharField(source="created_by.profile.display_name", read_only=True, default=None)
 
     class Meta:
         model = Granary
         fields = "__all__"
+        read_only_fields = ("status", "created_by")
 
     def get_current_stock(self, obj):
         return round(float(obj.current_stock), 2)
@@ -36,6 +40,7 @@ class GrainBatchSerializer(serializers.ModelSerializer):
     class Meta:
         model = GrainBatch
         fields = "__all__"
+        read_only_fields = ("quantity", "created_by")
 
 
 class MonitorRecordSerializer(serializers.ModelSerializer):
@@ -45,6 +50,7 @@ class MonitorRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = MonitorRecord
         fields = "__all__"
+        read_only_fields = ("alert_level", "inspector", "created_by")
 
 
 class StockRecordSerializer(serializers.ModelSerializer):
@@ -58,6 +64,7 @@ class StockRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = StockRecord
         fields = "__all__"
+        read_only_fields = ("operator", "created_by")
 
     def get_amount(self, obj):
         return round(float(obj.quantity) * float(obj.unit_price), 2)
@@ -81,6 +88,7 @@ class FumigationTaskSerializer(serializers.ModelSerializer):
     class Meta:
         model = FumigationTask
         fields = "__all__"
+        read_only_fields = ("leader", "actual_start", "actual_end", "status", "created_by")
 
     def validate(self, attrs):
         start = attrs.get("plan_start")
@@ -115,6 +123,7 @@ class StocktakeSerializer(serializers.ModelSerializer):
     class Meta:
         model = Stocktake
         fields = "__all__"
+        read_only_fields = ("status", "leader", "created_by")
 
     def _totals(self, obj):
         book = sum(float(i.book_quantity) for i in obj.items.all())
@@ -130,3 +139,48 @@ class StocktakeSerializer(serializers.ModelSerializer):
     def get_total_diff(self, obj):
         book, actual = self._totals(obj)
         return round(actual - book, 2)
+
+
+class OperationLogSerializer(serializers.ModelSerializer):
+    action_display = serializers.CharField(source="get_action_display", read_only=True)
+
+    class Meta:
+        model = OperationLog
+        fields = "__all__"
+
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source="user.username", read_only=True)
+    role_display = serializers.CharField(source="get_role_display", read_only=True)
+    granary_codes = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserProfile
+        fields = ["id", "username", "role", "role_display", "display_name", "phone", "granary_codes"]
+
+    def get_granary_codes(self, obj):
+        return list(obj.granaries.values_list("code", flat=True))
+
+
+class UserManageSerializer(serializers.Serializer):
+    """账号创建/编辑：同时维护 Django 账号、岗位与管辖仓房。"""
+
+    id = serializers.IntegerField(read_only=True)
+    username = serializers.CharField(max_length=150)
+    password = serializers.CharField(max_length=128, required=False, allow_blank=True,
+                                     help_text="新建必填，编辑时留空表示不改密码")
+    display_name = serializers.CharField(max_length=30)
+    role = serializers.ChoiceField(choices=UserProfile.Role.choices)
+    phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    granary_ids = serializers.ListField(
+        child=serializers.IntegerField(), required=False, allow_empty=True
+    )
+
+    def validate_username(self, value):
+        from django.contrib.auth.models import User
+        qs = User.objects.filter(username=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.user_id)
+        if qs.exists():
+            raise serializers.ValidationError("用户名已存在")
+        return value

@@ -2,7 +2,7 @@
   <div>
     <div class="page-header">
       <h2>熏蒸作业安排</h2>
-      <el-button type="primary" :icon="Plus" @click="openDialog()">安排熏蒸</el-button>
+      <el-button v-if="auth.canArrangeFumigation()" type="primary" :icon="Plus" @click="openDialog()">安排熏蒸</el-button>
     </div>
 
     <el-row :gutter="12" class="mb16">
@@ -60,7 +60,7 @@
         <el-table-column label="操作" width="230" fixed="right">
           <template #default="{ row }">
             <el-button
-              v-if="canAdvance(row.status)"
+              v-if="auth.canWrite() && canAdvance(row.status)"
               link
               type="warning"
               size="small"
@@ -68,9 +68,9 @@
             >
               {{ nextAction(row.status) }}
             </el-button>
-            <el-button link type="primary" size="small" @click="openDialog(row)">编辑</el-button>
+            <el-button v-if="auth.canArrangeFumigation()" link type="primary" size="small" @click="openDialog(row)">编辑</el-button>
             <el-popconfirm
-              v-if="row.status === 'planned' || row.status === 'canceled' || row.status === 'done'"
+              v-if="auth.canApproveOrDelete() && (row.status === 'planned' || row.status === 'canceled' || row.status === 'done')"
               title="确认删除该作业单？"
               @confirm="remove(row)"
             >
@@ -94,7 +94,7 @@
           <el-col :span="12">
             <el-form-item label="熏蒸仓房" prop="granary">
               <el-select v-model="form.granary" style="width: 100%">
-                <el-option v-for="g in granaries" :key="g.id" :label="`${g.code} ${g.name}`" :value="g.id" />
+                <el-option v-for="g in selectableGranaries" :key="g.id" :label="`${g.code} ${g.name}`" :value="g.id" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -133,8 +133,8 @@
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="负责人" prop="leader">
-              <el-input v-model="form.leader" />
+            <el-form-item label="负责人">
+              <el-input :model-value="auth.displayName" disabled />
             </el-form-item>
           </el-col>
           <el-col :span="12">
@@ -174,7 +174,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Search } from '@element-plus/icons-vue'
 import { fumigationApi, granaryApi } from '@/api'
 import { FUMIGATION_AGENT, FUMIGATION_STATUS, findType } from '@/utils/constants'
+import { useAuthStore } from '@/stores/auth'
 
+const auth = useAuthStore()
 const list = ref([])
 const granaries = ref([])
 const loading = ref(false)
@@ -260,8 +262,11 @@ const rules = {
   dose: [{ required: true, message: '请输入用药量', trigger: 'blur' }],
   plan_start: [{ required: true, message: '请选择开始时间', trigger: 'change' }],
   plan_end: [{ required: true, message: '请选择结束时间', trigger: 'change' }],
-  leader: [{ required: true, message: '请输入负责人', trigger: 'blur' }],
 }
+
+const selectableGranaries = computed(() =>
+  granaries.value.filter((g) => auth.canAccessGranary(g.id))
+)
 
 function openDialog(row) {
   Object.assign(form, emptyForm())

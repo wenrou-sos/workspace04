@@ -1,7 +1,14 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Layout from '@/components/Layout.vue'
+import { useAuthStore } from '@/stores/auth'
 
 const routes = [
+  {
+    path: '/login',
+    name: 'Login',
+    component: () => import('@/views/Login.vue'),
+    meta: { public: true, title: '登录' },
+  },
   {
     path: '/',
     component: Layout,
@@ -49,13 +56,41 @@ const routes = [
         component: () => import('@/views/Stocktakes.vue'),
         meta: { title: '库存盘点', icon: 'DocumentChecked' },
       },
+      {
+        path: 'operation-logs',
+        name: 'OperationLogs',
+        component: () => import('@/views/OperationLogs.vue'),
+        meta: { title: '操作日志', icon: 'List', manager: true },
+      },
+      {
+        path: 'users',
+        name: 'Users',
+        component: () => import('@/views/Users.vue'),
+        meta: { title: '账号岗位', icon: 'UserFilled', manager: true },
+      },
     ],
   },
+  { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
 ]
 
 const router = createRouter({
   history: createWebHistory(),
   routes,
+})
+
+router.beforeEach((to) => {
+  const auth = useAuthStore()
+  if (to.meta.public) {
+    if (auth.isLoggedIn && to.name === 'Login') return '/dashboard'
+    return true
+  }
+  if (!auth.isLoggedIn) {
+    return { path: '/login', query: { redirect: to.fullPath } }
+  }
+  if (to.meta.manager && !auth.isManager) {
+    return { path: '/dashboard' }
+  }
+  return true
 })
 
 export default router

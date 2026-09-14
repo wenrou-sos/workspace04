@@ -15,14 +15,12 @@
         text-color="#c4d3cb"
         active-text-color="#f5c542"
       >
-        <el-menu-item
-          v-for="item in menus"
-          :key="item.path"
-          :index="item.path"
-        >
-          <el-icon><component :is="item.icon" /></el-icon>
-          <span>{{ item.title }}</span>
-        </el-menu-item>
+        <template v-for="item in visibleMenus" :key="item.path">
+          <el-menu-item :index="item.path">
+            <el-icon><component :is="item.icon" /></el-icon>
+            <span>{{ item.title }}</span>
+          </el-menu-item>
+        </template>
       </el-menu>
     </el-aside>
 
@@ -31,10 +29,21 @@
         <div class="header-title">{{ $route.meta.title }}</div>
         <div class="header-right">
           <el-icon><Location /></el-icon>
-          <span>中央储备粮 XX 直属库</span>
+          <span class="depot-name">中央储备粮 XX 直属库</span>
           <el-divider direction="vertical" />
-          <el-avatar :size="30" style="background: #b8860b">管</el-avatar>
-          <span>库管员</span>
+          <el-tag size="small" :type="roleTagType" effect="dark">{{ auth.user?.role_display }}</el-tag>
+          <el-avatar :size="30" style="background: #b8860b">{{ auth.displayName.slice(0, 1) }}</el-avatar>
+          <el-dropdown @command="onCommand">
+            <span class="user-name">
+              {{ auth.displayName }}
+              <el-icon><ArrowDown /></el-icon>
+            </span>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="logout" :icon="SwitchButton">退出登录</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
       </el-header>
       <el-main class="main-content">
@@ -49,7 +58,16 @@
 </template>
 
 <script setup>
-const menus = [
+import { computed } from 'vue'
+import { useRouter } from 'vue-router'
+import { ElMessageBox } from 'element-plus'
+import { SwitchButton } from '@element-plus/icons-vue'
+import { useAuthStore } from '@/stores/auth'
+
+const auth = useAuthStore()
+const router = useRouter()
+
+const allMenus = [
   { path: '/dashboard', title: '综合看板', icon: 'Odometer' },
   { path: '/granaries', title: '仓房管理', icon: 'House' },
   { path: '/batches', title: '库存粮情', icon: 'Wheat' },
@@ -57,7 +75,24 @@ const menus = [
   { path: '/stock-records', title: '出入库记录', icon: 'Switch' },
   { path: '/fumigations', title: '熏蒸作业', icon: 'MagicStick' },
   { path: '/stocktakes', title: '库存盘点', icon: 'DocumentChecked' },
+  { path: '/operation-logs', title: '操作日志', icon: 'List', manager: true },
+  { path: '/users', title: '账号岗位', icon: 'UserFilled', manager: true },
 ]
+const visibleMenus = computed(() =>
+  allMenus.filter((m) => !m.manager || auth.isManager)
+)
+
+const roleTagType = computed(() => {
+  return { admin: 'danger', director: 'warning', keeper: 'success', viewer: 'info' }[auth.role] || 'info'
+})
+
+async function onCommand(cmd) {
+  if (cmd === 'logout') {
+    await ElMessageBox.confirm('确认退出登录？', '提示', { type: 'warning' })
+    await auth.logout()
+    router.replace('/login')
+  }
+}
 </script>
 
 <style scoped>
@@ -115,6 +150,19 @@ const menus = [
   gap: 8px;
   color: #5a6b62;
   font-size: 14px;
+}
+
+.depot-name {
+  color: #5a6b62;
+}
+
+.user-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: #1f2d3d;
+  outline: none;
 }
 
 .main-content {

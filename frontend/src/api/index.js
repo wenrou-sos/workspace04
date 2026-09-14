@@ -6,6 +6,13 @@ const api = axios.create({
   timeout: 15000,
 })
 
+// 请求自动携带登录令牌
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('gd_token')
+  if (token) config.headers.Authorization = `Token ${token}`
+  return config
+})
+
 api.interceptors.response.use(
   (response) => response.data,
   (error) => {
@@ -13,7 +20,21 @@ api.interceptors.response.use(
     let msg = '网络异常，请检查后端服务是否启动（http://localhost:8000）'
     if (resp) {
       const contentType = resp.headers?.['content-type'] || ''
-      if (contentType.includes('application/json')) {
+      if (resp.status === 401) {
+        msg = '登录已失效，请重新登录'
+        localStorage.removeItem('gd_token')
+        localStorage.removeItem('gd_user')
+        // 避免在登录页重复跳转
+        if (!location.hash.startsWith('#/login') && location.pathname !== '/login') {
+          location.href = '/login'
+        }
+      } else if (resp.status === 403) {
+        if (contentType.includes('application/json')) {
+          msg = resp.data?.detail || '当前岗位无权执行该操作'
+        } else {
+          msg = '当前岗位无权执行该操作（403）'
+        }
+      } else if (contentType.includes('application/json')) {
         const detail = resp.data
         if (typeof detail === 'string') msg = detail
         else if (detail.detail) msg = detail.detail
@@ -99,4 +120,22 @@ export const dashboardApi = {
   summary: () => api.get('/dashboard/'),
   trend: () => api.get('/dashboard/trend/'),
   tempMonitor: () => api.get('/dashboard/temp_monitor/'),
+}
+
+// ---- 当前身份 / 操作日志 / 账号岗位 ----
+export const authApi = {
+  me: () => api.get('/auth/me/'),
+}
+
+export const operationLogApi = {
+  list: (params) => api.get('/operation-logs/', { params }),
+}
+
+export const userApi = {
+  list: (params) => api.get('/users/', { params }),
+  retrieve: (id) => api.get(`/users/${id}/`),
+  create: (data) => api.post('/users/', data),
+  update: (id, data) => api.put(`/users/${id}/`, data),
+  patch: (id, data) => api.patch(`/users/${id}/`, data),
+  remove: (id) => api.delete(`/users/${id}/`),
 }

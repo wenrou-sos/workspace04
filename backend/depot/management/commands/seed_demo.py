@@ -19,6 +19,7 @@ from depot.models import (
     Stocktake,
     StocktakeItem,
 )
+from depot.management.commands.setup_accounts import ensure_accounts
 
 random.seed(20260914)
 
@@ -55,6 +56,8 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         self.stdout.write("清理旧样例数据……")
+        from depot.models import OperationLog, UserProfile
+        OperationLog.objects.all().delete()
         StocktakeItem.objects.all().delete()
         Stocktake.objects.all().delete()
         FumigationTask.objects.all().delete()
@@ -62,16 +65,32 @@ class Command(BaseCommand):
         MonitorRecord.objects.all().delete()
         GrainBatch.objects.all().delete()
         Granary.objects.all().delete()
+        # 清空非管理员账号，随后由 ensure_accounts 统一重建
+        UserProfile.objects.exclude(user__is_superuser=True).delete()
+        from django.contrib.auth.models import User as AuthUser
+        AuthUser.objects.filter(is_superuser=False).delete()
 
         now = timezone.now()
+
+        # 先建账号（仓房尚未创建，保管员管辖关系在建仓后补授权）
+        accounts = ensure_accounts(granary_map=None)
+        director = accounts["director"]
+        keepers = accounts["keepers"]
+
         granary_map = {}
         for code, name, gtype, cap, area, mgr, loc, year, t, h in GRANARIES:
             g = Granary.objects.create(
                 code=code, name=name, granary_type=gtype, capacity=cap, area=area,
                 manager=mgr, location=loc, build_year=year,
                 temperature_threshold=t, humidity_threshold=h,
+                created_by=director,
             )
             granary_map[code] = g
+
+        # 为保管员分配各自管辖仓房
+        for code, keeper_user in keepers.items():
+            if code in granary_map:
+                keeper_user.profile.granaries.set([granary_map[code]])
 
         self.stdout.write("生成在储批次与出入库流水……")
         seq = 1
@@ -79,6 +98,7 @@ class Command(BaseCommand):
             granary = granary_map[code]
             if not plan:
                 continue
+            keeper_user = keepers[code]
             kind, grade, target, origin, year, moisture, impurity, price = plan
             inbound_date = now - timedelta(days=random.randint(120, 200))
             batch = GrainBatch.objects.create(
@@ -88,6 +108,7 @@ class Command(BaseCommand):
                 inbound_price=price, production_year=year,
                 stored_at=inbound_date.date(),
                 moisture=moisture, impurity=impurity,
+                created_by=keeper_user,
             )
             inbound_qty = float(granary.capacity) * random.uniform(0.85, 0.97)
             StockRecord.objects.create(
@@ -96,7 +117,7 @@ class Command(BaseCommand):
                 quantity=round(inbound_qty, 2), unit_price=price,
                 counterparty=random.choice(SUPPLIERS),
                 operator=granary.manager, occurred_at=inbound_date,
-                remark="新粮收购整仓入库",
+                remark="新粮收购整仓入库", created_by=keeper_user,
             )
             seq += 1
 
@@ -109,7 +130,7 @@ class Command(BaseCommand):
                     quantity=round(out_qty, 2), unit_price=round(price * 1.05, 2),
                     counterparty=random.choice(BUYERS),
                     operator=granary.manager, occurred_at=out_date,
-                    remark="轮换销售出库",
+                    remark="轮换销售出库", created_by=keeper_user,
                 )
                 seq += 1
 
@@ -131,7 +152,7 @@ class Command(BaseCommand):
                     quantity=qty,
                     unit_price=price if direction == "in" else round(price * 1.05, 2),
                     counterparty=random.choice(SUPPLIERS + BUYERS),
-                    operator=granary.manager, occurred_at=d,
+                    operator=granary.manager, occurred_at=d, created_by=keeper_user,
                 )
                 seq += 1
 
@@ -146,6 +167,7 @@ class Command(BaseCommand):
         for code, granary in granary_map.items():
             if granary.status == Granary.Status.MAINTENANCE:
                 continue
+            keeper_user = keepers.get(code)
             for hours_ago in range(0, 24 * 7, 4):
                 ts = now - timedelta(hours=hours_ago, minutes=random.randint(0, 30))
                 # 白天温度高、夜间低；在储仓粮温略高
@@ -176,7 +198,7 @@ class Command(BaseCommand):
                     outside_humidity=round(62 + random.uniform(-10, 12), 1),
                     sensor_layer=random.choice(layers),
                     inspector=granary.manager if random.random() > 0.4 else "值班员",
-                    note=note,
+                    note=note, created_by=keeper_user,
                 )
 
         self.stdout.write("生成熏蒸作业安排……")
@@ -188,7 +210,7 @@ class Command(BaseCommand):
             seal_days=10, status="sealed", leader="刘志强",
             team="刘志强、马超、丁一", target_pest="玉米象、赤拟谷盗",
             safety_note="作业人员佩戴防毒面具；仓区 20 米内设警戒；散气后检测磷化氢浓度低于 0.3mg/m³ 方可入仓。",
-            remark="秋季保粮熏蒸",
+            remark="秋季保粮熏蒸", created_by=director,
         )
         FumigationTask.objects.create(
             task_no="XZ20260920001", granary=granary_map["P03"],
@@ -197,7 +219,7 @@ class Command(BaseCommand):
             seal_days=9, status="planned", leader="陈丽华",
             team="陈丽华、王芳、丁一", target_pest="麦蛾、锯谷盗",
             safety_note="施药前检查气密性；备足防毒器具与急救药品。",
-            remark="计划结合秋季普查开展",
+            remark="计划结合秋季普查开展", created_by=director,
         )
         FumigationTask.objects.create(
             task_no="XZ20260615001", granary=granary_map["P01"],
@@ -208,6 +230,7 @@ class Command(BaseCommand):
             team="张建国、马超", target_pest="玉米象",
             effect="熏蒸后布点检测无活虫，杀虫率 100%",
             safety_note="散气 72 小时，浓度检测合格后清渣。",
+            created_by=director,
         )
 
         self.stdout.write("生成 8 月份盘点单（已完成调账，并生成对应盘亏调整流水）……")
@@ -216,6 +239,7 @@ class Command(BaseCommand):
             plan_date=now.date() - timedelta(days=14),
             leader="赵国栋", members="赵国栋、张建国、李秀英、王海涛、陈丽华、刘志强",
             status="adjusted", remark="月末例行盘点，账实基本相符，零星水分减量已调账。",
+            created_by=director,
         )
         adjust_seq = 0
         for batch in GrainBatch.objects.all():
@@ -237,13 +261,14 @@ class Command(BaseCommand):
                 operator="赵国栋",
                 occurred_at=timezone.make_aware(datetime.combine(st.plan_date, dtime(16, 0))),
                 remark="2026年8月末库存盘点 盘亏：保管自然损耗（水分减量）",
+                created_by=director,
             )
 
         # 一张进行中的 9 月盘点草稿，方便前端演示生成明细
         Stocktake.objects.create(
             stocktake_no="PD20260914001", name="2026年9月中旬盘点",
             plan_date=now.date(), leader="赵国栋", members="各仓保管员",
-            status="draft", remark="季度盘点",
+            status="draft", remark="季度盘点", created_by=director,
         )
 
         self.stdout.write(self.style.SUCCESS(
@@ -252,5 +277,7 @@ class Command(BaseCommand):
             f"{StockRecord.objects.count()} 条出入库流水、"
             f"{MonitorRecord.objects.count()} 条温湿度记录、"
             f"{FumigationTask.objects.count()} 个熏蒸任务、"
-            f"{Stocktake.objects.count()} 张盘点单。"
+            f"{Stocktake.objects.count()} 张盘点单。\n"
+            f"演示账号：admin/admin123（管理员）、director/director123（库管主任）、"
+            f"zhangjg 等 8 名保管员/keeper123、viewer/viewer123（只读）。"
         ))

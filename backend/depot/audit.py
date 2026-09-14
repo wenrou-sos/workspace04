@@ -39,14 +39,25 @@ class AuditModelMixin:
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
+    def create_action(self, instance):
+        """新增成功后记录的日志动作，默认“新增”，子类可覆盖（如入库/出库）。"""
+        return OperationLog.Action.CREATE
+
+    def create_detail(self, instance):
+        """新增日志详情，默认空，子类可覆盖。"""
+        return ""
+
     def create(self, request, *args, **kwargs):
         response = super().create(request, *args, **kwargs)
         if response.status_code == 201:
             instance = self.get_queryset().model.objects.filter(pk=response.data.get("id")).first()
             write_log(
-                request.user, OperationLog.Action.CREATE, self.audit_module,
+                request.user,
+                self.create_action(instance) if instance else OperationLog.Action.CREATE,
+                self.audit_module,
                 self.target_label(instance) if instance else "",
-                "", request=request,
+                self.create_detail(instance) if instance else "",
+                request=request,
             )
         return response
 

@@ -84,24 +84,6 @@ class ScopedModelViewSet(ProtectedDeleteMixin, AuditModelMixin, viewsets.ModelVi
             return obj
         return getattr(obj, "granary", None)
 
-    def create(self, request, *args, **kwargs):
-        response = super().create(request, *args, **kwargs)
-        if response.status_code == 201:
-            instance = self.get_queryset().model.objects.filter(pk=response.data.get("id")).first()
-            write_log(
-                request.user, self.create_action(instance), self.audit_module,
-                self.target_label(instance) if instance else "",
-                self.audit_detail(instance) if instance else "",
-                request=request,
-            )
-        return response
-
-    def create_action(self, instance):
-        return OperationLog.Action.CREATE
-
-    def audit_detail(self, instance):
-        return ""
-
 
 class GranaryViewSet(ScopedModelViewSet):
     queryset = Granary.objects.all()
@@ -194,7 +176,7 @@ class StockRecordViewSet(ScopedModelViewSet):
     def create_action(self, instance):
         return OperationLog.Action.STOCK_IN if instance.direction == "in" else OperationLog.Action.STOCK_OUT
 
-    def audit_detail(self, instance):
+    def create_detail(self, instance):
         return (
             f"{instance.get_direction_display()}{instance.quantity}吨，"
             f"{instance.get_biz_type_display()}，对方：{instance.counterparty or '—'}"
@@ -472,13 +454,24 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             profile.granaries.set(Granary.objects.filter(id__in=data.get("granary_ids", [])))
         else:
             profile.granaries.clear()
-        serializer.instance = profile
+        serializer.saved_profile = profile
         write_log(self.request.user, OperationLog.Action.CREATE, "账号岗位",
                   str(profile), f"创建账号 {user.username}", request=self.request)
 
-    def perform_update(self, serializer):
-        data = serializer.validated_data
+    def create(self, request, *args, **kwargs):
+        # 用只读 Profile 序列化器返回，避免写入 Serializer 对实例二次取值报错
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        profile = serializer.saved_profile
+        return Response(UserProfileSerializer(profile).data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
         profile = self.get_object()
+        serializer = self.get_serializer(profile, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
         user = profile.user
         if data.get("password"):
             user.set_password(data["password"])
@@ -497,6 +490,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             profile.granaries.clear()
         write_log(self.request.user, OperationLog.Action.UPDATE, "账号岗位",
                   str(profile), f"更新账号 {user.username}", request=self.request)
+        return Response(UserProfileSerializer(profile).data)
 
     def destroy(self, request, *args, **kwargs):
         profile = self.get_object()

@@ -209,6 +209,8 @@ class FumigationTaskViewSet(ScopedModelViewSet):
     audit_module = "熏蒸作业"
     scoped_create = True
     create_roles = MANAGE_ROLES  # 安排熏蒸仅主任/管理员
+    update_roles = MANAGE_ROLES  # 修改作业内容仅主任/管理员；保管员只能推进状态
+    delete_roles = MANAGE_ROLES
     action_roles = {"advance": WRITE_ROLES}  # 保管员可推进自己仓的作业状态
 
     def obj_granary(self, obj):
@@ -258,6 +260,8 @@ class StocktakeViewSet(ScopedModelViewSet):
     audit_module = "库存盘点"
     granary_field = None  # 盘点单是全库性单据，保管员可见但只能操作自己仓的明细
     create_roles = MANAGE_ROLES
+    update_roles = MANAGE_ROLES  # 表头/日期仅主任/管理员可改
+    delete_roles = MANAGE_ROLES
     action_roles = {
         "generate_items": WRITE_ROLES,
         "finish": MANAGE_ROLES,  # 盘点调账（审核）仅主任/管理员
@@ -280,15 +284,19 @@ class StocktakeViewSet(ScopedModelViewSet):
 
     @action(detail=True, methods=["post"])
     def generate_items(self, request, pk=None):
-        """按当前在储批次生成/补充盘点明细（保管员只覆盖自己管辖仓房）。"""
-        stocktake = self.get_object()
-        if stocktake.status not in (Stocktake.Status.DRAFT, Stocktake.Status.COUNTING):
-            return Response({"detail": "盘点已结束，不能再生成明细"}, status=400)
-        batches = GrainBatch.objects.filter(quantity__gt=0).select_related("granary")
-        ids = self.scope_ids()
-        if ids is not None:
-            batches = batches.filter(granary_id__in=ids)
+        """按当前在储批次生成/补充盘点明细（保管员只覆盖自己管辖仓房）。
+
+        盘点中（counting）允许分仓反复补录；已结束的单据拒绝。
+        """
         with transaction.atomic():
+            stocktake = Stocktake.objects.select_for_update().get(pk=pk)
+            self.check_object_permissions(request, stocktake)
+            if stocktake.status not in (Stocktake.Status.DRAFT, Stocktake.Status.COUNTING):
+                return Response({"detail": "盘点已结束，不能再生成或补充明细"}, status=400)
+            batches = GrainBatch.objects.filter(quantity__gt=0).select_related("granary")
+            ids = self.scope_ids()
+            if ids is not None:
+                batches = batches.filter(granary_id__in=ids)
             # 不清空别人已生成的明细，仅补本仓房范围缺失的
             existing_batch_ids = set(stocktake.items.values_list("batch_id", flat=True))
             items = [
@@ -302,6 +310,7 @@ class StocktakeViewSet(ScopedModelViewSet):
             StocktakeItem.objects.bulk_create(items)
             stocktake.status = Stocktake.Status.COUNTING
             stocktake.save(update_fields=["status"])
+
         write_log(
             request.user, OperationLog.Action.STOCKTAKE_GENERATE, "库存盘点",
             str(stocktake), f"生成/补充盘点明细 {len(items)} 条", request=request,
@@ -316,23 +325,41 @@ class StocktakeViewSet(ScopedModelViewSet):
 
         批次结存由出入库流水驱动，因此盘点调账为每个差异批次生成一条
         signed 调整流水——批次结存、仓房结存（流水汇总）、盘点结果三处一致。
-        """
-        stocktake = self.get_object()
-        items_qs = stocktake.items.select_related("batch", "granary")
-        ids = self.scope_ids()
-        if ids is not None:
-            items_qs = items_qs.filter(granary_id__in=ids)
-        items = list(items_qs)
-        if not items:
-            return Response({"detail": "盘点明细为空，请先生成明细"}, status=400)
-        unfilled = [i for i in items if i.actual_quantity is None]
-        if unfilled:
-            return Response({"detail": f"还有 {len(unfilled)} 条明细未填写实盘数量"}, status=400)
 
-        operator = actor_name(request.user)
-        seq = StockRecord.objects.filter(record_no__startswith=f"{stocktake.stocktake_no}-A").count()
-        detail_lines = []
+        安全控制：
+        - 仅「盘点中」的单据可调账，草稿/已调账/已完成重复提交一律拒绝；
+        - 对盘点单行加锁，防止双击或并发请求二次生成调整流水。
+        """
         with transaction.atomic():
+            # select_for_update 锁定盘点单，并发的第二个请求会阻塞后看到已调账状态
+            stocktake = Stocktake.objects.select_for_update().get(pk=pk)
+            self.check_object_permissions(request, stocktake)
+            if stocktake.status == Stocktake.Status.ADJUSTED:
+                return Response(
+                    {"detail": "该盘点单已完成调账，不能重复提交；如需再次调整请新建盘点单。"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if stocktake.status == Stocktake.Status.DRAFT:
+                return Response({"detail": "盘点单尚在草稿状态，请先生成并录入盘点明细。"}, status=400)
+            if stocktake.status != Stocktake.Status.COUNTING:
+                return Response({"detail": f"盘点单当前为「{stocktake.get_status_display()}」状态，不能调账。"}, status=400)
+
+            items_qs = stocktake.items.select_related("batch", "granary")
+            ids = self.scope_ids()
+            if ids is not None:
+                items_qs = items_qs.filter(granary_id__in=ids)
+            items = list(items_qs)
+            if not items:
+                return Response({"detail": "盘点明细为空，请先生成明细"}, status=400)
+            unfilled = [i for i in items if i.actual_quantity is None]
+            if unfilled:
+                return Response({"detail": f"还有 {len(unfilled)} 条明细未填写实盘数量"}, status=400)
+
+            operator = actor_name(request.user)
+            seq = StockRecord.objects.filter(
+                record_no__startswith=f"{stocktake.stocktake_no}-A"
+            ).count()
+            detail_lines = []
             for item in items:
                 diff = round(float(item.actual_quantity) - float(item.book_quantity), 2)
                 item.gain_quantity = diff if diff > 0 else 0
@@ -356,15 +383,18 @@ class StocktakeViewSet(ScopedModelViewSet):
                 )
                 detail_lines.append(f"{item.granary.code}/{item.batch.batch_no} {'+' if diff > 0 else ''}{diff}吨")
 
-            # 全部明细都已实盘才允许置为已调账
+            # 全部明细都已实盘才允许置为已调账（防止部分录入时被误关单）
             if not stocktake.items.filter(actual_quantity__isnull=True).exists():
                 stocktake.status = Stocktake.Status.ADJUSTED
                 stocktake.save(update_fields=["status"])
+
         write_log(
             request.user, OperationLog.Action.STOCKTAKE_ADJUST, "库存盘点",
             str(stocktake), "；".join(detail_lines) or "无差异", request=request,
         )
-        return Response(StocktakeSerializer(stocktake).data)
+        # 重新查询刷新 items prefetch
+        refreshed = Stocktake.objects.prefetch_related("items").get(pk=stocktake.pk)
+        return Response(StocktakeSerializer(refreshed).data)
 
 
 class StocktakeItemViewSet(ScopedModelViewSet):

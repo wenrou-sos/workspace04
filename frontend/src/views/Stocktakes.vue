@@ -115,26 +115,29 @@
           <el-button
             type="primary"
             :icon="Refresh"
-            :disabled="detail.status !== 'draft' || !auth.canWrite()"
+            :disabled="!canGenerate"
             :loading="generating"
             @click="generateItems"
           >
-            按在储批次生成盘点明细
+            {{ detail.status === 'draft' ? '按在储批次生成盘点明细' : '补充本仓未盘点明细' }}
           </el-button>
           <el-button
             type="success"
             :icon="Check"
-            :disabled="detail.status !== 'counting' || !auth.canApproveOrDelete()"
+            :disabled="!canFinish"
             @click="finish"
           >
             完成盘点并调账
           </el-button>
-          <el-tag v-if="!auth.canApproveOrDelete()" size="small" type="info">
-            保管员录入实盘，调账由库管主任完成
+          <el-tag v-if="detail.status === 'counting' && !auth.canApproveOrDelete() && auth.canWrite()" size="small" type="info">
+            保管员录入本仓实盘，调账由库管主任完成
           </el-tag>
+          <el-tag v-if="!auth.canWrite()" size="small" type="info">只读账号</el-tag>
           <span class="tip" v-if="detail.status === 'draft'">先生成明细，再逐仓录入实盘数量</span>
-          <span class="tip" v-else-if="detail.status === 'counting'">录入全部实盘数量后完成盘点</span>
-          <span class="tip done" v-else>盘点已结束，批次结存已按实盘调整</span>
+          <span class="tip" v-else-if="detail.status === 'counting'">
+            可继续补充漏盘仓房；已录 {{ filledCount }}/{{ items.length }} 条，全部录完后由主任调账
+          </span>
+          <span class="tip done" v-else>盘点已结束，批次结存已按实盘调整，不可重复调账</span>
         </div>
 
         <el-table :data="items" border size="small">
@@ -277,6 +280,20 @@ const detail = ref(null)
 const items = ref([])
 const generating = ref(false)
 
+// 生成/补录：草稿或盘点中，且有写权限（保管员仅补自己管辖仓房，后端过滤）
+const canGenerate = computed(
+  () => auth.canWrite() && detail.value && ['draft', 'counting'].includes(detail.value.status)
+)
+// 完成调账：仅盘点中，且为主任/管理员
+const canFinish = computed(
+  () =>
+    auth.canApproveOrDelete() &&
+    detail.value?.status === 'counting' &&
+    items.value.length > 0 &&
+    items.value.every((i) => i.actual_quantity != null)
+)
+const filledCount = computed(() => items.value.filter((i) => i.actual_quantity != null).length)
+
 async function showDetail(row) {
   detailVisible.value = true
   await refreshDetail(row.id)
@@ -293,10 +310,16 @@ async function generateItems() {
   generating.value = true
   try {
     const data = await stocktakeApi.generateItems(detail.value.id)
+    const before = items.value.length
     detail.value = data
     const res = await stocktakeItemApi.list({ stocktake: detail.value.id, page_size: 500 })
     items.value = res.results ?? res
-    ElMessage.success(`已按 ${items.value.length} 个在储批次生成明细，可录入实盘数`)
+    const added = items.value.length - before
+    ElMessage.success(
+      added > 0
+        ? `已补充 ${added} 条本仓在储批次明细，共 ${items.value.length} 条`
+        : `管辖范围内的在储批次均已在盘点单中（共 ${items.value.length} 条）`
+    )
   } finally {
     generating.value = false
   }

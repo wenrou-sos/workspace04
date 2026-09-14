@@ -5,7 +5,7 @@
 """
 import math
 import random
-from datetime import timedelta
+from datetime import datetime, timedelta, time as dtime
 
 from django.core.management.base import BaseCommand
 from django.utils import timezone
@@ -210,21 +210,33 @@ class Command(BaseCommand):
             safety_note="散气 72 小时，浓度检测合格后清渣。",
         )
 
-        self.stdout.write("生成 8 月份盘点单（已完成调账）……")
+        self.stdout.write("生成 8 月份盘点单（已完成调账，并生成对应盘亏调整流水）……")
         st = Stocktake.objects.create(
             stocktake_no="PD20260831001", name="2026年8月末库存盘点",
             plan_date=now.date() - timedelta(days=14),
             leader="赵国栋", members="赵国栋、张建国、李秀英、王海涛、陈丽华、刘志强",
             status="adjusted", remark="月末例行盘点，账实基本相符，零星水分减量已调账。",
         )
+        adjust_seq = 0
         for batch in GrainBatch.objects.all():
-            book = float(batch.quantity) * 1.003  # 盘点时账面略大于现在
+            book = round(float(batch.quantity), 2)  # 盘点时账面 = 截至盘点日流水汇总
             loss = round(book * random.uniform(0.0004, 0.0015), 2)
             actual = round(book - loss, 2)
             StocktakeItem.objects.create(
                 stocktake=st, granary=batch.granary, batch=batch,
-                book_quantity=round(book, 2), actual_quantity=actual,
+                book_quantity=book, actual_quantity=actual,
                 loss_quantity=loss, reason="保管自然损耗（水分减量）",
+            )
+            adjust_seq += 1
+            # 盘亏出库流水：批次结存、仓房结存随流水联动扣减
+            StockRecord.objects.create(
+                record_no=f"PD20260831001-A{adjust_seq:02d}",
+                granary=batch.granary, batch=batch,
+                direction="out", biz_type="adjust_loss",
+                quantity=loss, unit_price=0, counterparty="库存盘点调账",
+                operator="赵国栋",
+                occurred_at=timezone.make_aware(datetime.combine(st.plan_date, dtime(16, 0))),
+                remark="2026年8月末库存盘点 盘亏：保管自然损耗（水分减量）",
             )
 
         # 一张进行中的 9 月盘点草稿，方便前端演示生成明细

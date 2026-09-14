@@ -9,13 +9,23 @@ const api = axios.create({
 api.interceptors.response.use(
   (response) => response.data,
   (error) => {
-    const detail = error.response?.data
-    let msg = '请求失败'
-    if (detail) {
-      if (typeof detail === 'string') msg = detail
-      else if (detail.detail) msg = detail.detail
-      else if (Array.isArray(detail) && detail[0]) msg = String(detail[0])
-      else msg = Object.entries(detail).map(([k, v]) => `${k}: ${v}`).join('；')
+    const resp = error.response
+    let msg = '网络异常，请检查后端服务是否启动（http://localhost:8000）'
+    if (resp) {
+      const contentType = resp.headers?.['content-type'] || ''
+      if (contentType.includes('application/json')) {
+        const detail = resp.data
+        if (typeof detail === 'string') msg = detail
+        else if (detail.detail) msg = detail.detail
+        else if (Array.isArray(detail) && detail[0]) msg = String(detail[0])
+        else msg = Object.entries(detail).map(([k, v]) => `${k}: ${v}`).join('；')
+      } else if (resp.status >= 500) {
+        msg = `服务器内部错误（${resp.status}），请查看后端日志 /tmp/django.log`
+      } else {
+        msg = `请求失败（HTTP ${resp.status}）`
+      }
+    } else if (error.code === 'ERR_NETWORK') {
+      msg = '无法连接后端（:8000），请先启动 Django 服务'
     }
     ElMessage.error(msg)
     return Promise.reject(error)

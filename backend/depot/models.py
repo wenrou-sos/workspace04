@@ -191,6 +191,8 @@ class StockRecord(TimeStampedModel):
         TRANSFER_OUT = "transfer_out", "调出出仓"
         LOSS = "loss", "损耗出库"
         PROCESS = "process", "加工出库"
+        ADJUST_GAIN = "adjust_gain", "盘盈入库"
+        ADJUST_LOSS = "adjust_loss", "盘亏出库"
 
     record_no = models.CharField("单据编号", max_length=30, unique=True)
     granary = models.ForeignKey(

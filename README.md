@@ -38,24 +38,43 @@
 
 ## 快速开始
 
-### 1. 安装依赖
+### 方式一：一键启动（推荐）
 
 ```bash
-# Python 依赖
+# 1) 安装依赖（首次）
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r backend/requirements.txt
+cd frontend && npm install && cd ..
+
+# 2) 一键启动（自动初始化内置 PG、迁移、填充样例数据、起后端和前端）
+bash scripts/start.sh
+```
+
+脚本幂等，重复执行不会重复播种。之后浏览器访问 <http://localhost:5173>。
+停止全部服务：`bash scripts/stop.sh`。
+
+> Linux 受管 Python（PEP 668）若 `pip install` 报 externally-managed 错误，
+> 请务必使用上面的 venv；或在明确风险后加 `--break-system-packages`。
+
+### 方式二：分步启动
+
+```bash
+# 1. Python 依赖（建议 venv）
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r backend/requirements.txt
 
-# 前端依赖
+# 2. 前端依赖
 cd frontend && npm install && cd ..
-```
 
-### 2. 初始化数据库与样例数据
-
-```bash
+# 3. 初始化数据库（启动内置 PG → 建库 → migrate → 填充样例数据）
 bash scripts/init.sh
-# 等价于：启动 PG → CREATE DATABASE → migrate → seed_demo
+
+# 4. 启动服务（两个终端）
+cd backend && python3 manage.py runserver 0.0.0.0:8000
+cd frontend && npm run dev
 ```
 
-连接**外部 PostgreSQL** 时无需使用内置二进制，用环境变量覆盖即可：
+连接**外部 PostgreSQL** 时无需使用内置二进制，用环境变量覆盖即可（脚本检测到 `PGHOST` 会自动跳过内置 PG）：
 
 ```bash
 export PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGPASSWORD=xxx PGDATABASE=grain_depot
@@ -63,15 +82,14 @@ python3 backend/manage.py migrate
 python3 backend/manage.py seed_demo
 ```
 
-### 3. 启动服务
+### 常见启动问题
 
-```bash
-# 终端 A：Django API（:8000）
-cd backend && python3 manage.py runserver 0.0.0.0:8000
-
-# 终端 B：Vite 前端（:5173，/api 自动代理到 8000）
-cd frontend && npm run dev
-```
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| 后端报 `connection refused` / 页面提示无法连接 :8000 | 内置 PostgreSQL 未启动，先执行 `bash scripts/start-db.sh` 或 `bash scripts/start.sh` |
+| `pip install` 报 externally-managed | 系统 Python 受 PEP 668 保护，请使用 venv（见方式一） |
+| 内置 PG 报找不到共享库 | 启动脚本已自动设置 `LD_LIBRARY_PATH`；手动执行命令时请先 `export LD_LIBRARY_PATH=$PWD/pgsql/lib` |
+| 端口 8000/5173/55432 被占用 | 先 `bash scripts/stop.sh`，或修改对应配置 |
 
 浏览器打开 <http://localhost:5173>
 
@@ -108,3 +126,5 @@ cd frontend && npm run dev
 - 出库数量超过批次结存时后端校验拒绝
 - 温湿度记录保存时按仓房阈值自动定级：达阈值=预警，超阈值 3℃ / 湿度超 10% = 告警
 - 熏蒸进入施药/密闭/散气状态时仓房自动置为「熏蒸中」，完成后按结存恢复在储/空仓
+- 盘点调账通过生成「盘盈入库 / 盘亏出库」调整流水完成（而非直接改数量），因此看板、仓房结存、批次结存与流水始终一致
+- 删除已有业务引用的仓房/批次时返回 409 并列出被哪些数据引用，需先清理引用数据

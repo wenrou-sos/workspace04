@@ -48,6 +48,8 @@ export const BIZ_TYPE = [
   { value: 'transfer_out', label: '调出出仓' },
   { value: 'loss', label: '损耗出库' },
   { value: 'process', label: '加工出库' },
+  { value: 'adjust_gain', label: '盘盈入库' },
+  { value: 'adjust_loss', label: '盘亏出库' },
 ]
 
 export const FUMIGATION_AGENT = [

@@ -1,6 +1,7 @@
 """视图：ModelViewSet + 仪表盘/图表聚合接口。"""
 from datetime import timedelta
 
+from django.db import transaction
 from django.db.models import Sum
 from django.db.models.functions import TruncDate
 from django.utils import timezone
@@ -9,6 +10,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from .filters import MonitorRecordFilter, StockRecordFilter
+from .mixins import ProtectedDeleteMixin
 from .models import (
     FumigationTask,
     GrainBatch,
@@ -29,7 +31,7 @@ from .serializers import (
 )
 
 
-class GranaryViewSet(viewsets.ModelViewSet):
+class GranaryViewSet(ProtectedDeleteMixin, viewsets.ModelViewSet):
     queryset = Granary.objects.all()
     serializer_class = GranarySerializer
     filterset_fields = ["status", "granary_type"]
@@ -55,7 +57,7 @@ class GranaryViewSet(viewsets.ModelViewSet):
         )
 
 
-class GrainBatchViewSet(viewsets.ModelViewSet):
+class GrainBatchViewSet(ProtectedDeleteMixin, viewsets.ModelViewSet):
     queryset = GrainBatch.objects.select_related("granary").all()
     serializer_class = GrainBatchSerializer
     filterset_fields = ["granary", "grain_kind", "grade"]
@@ -142,30 +144,46 @@ class StocktakeViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def finish(self, request, pk=None):
-        """完成盘点：汇总差异并回写批次结存（调账）。"""
+        """完成盘点：汇总差异，生成盘盈/盘亏调整流水并联动结存。
+
+        批次结存由出入库流水驱动，因此盘点调账不直接修改数量，
+        而是为每个差异批次生成一条 signed 调整流水——
+        这样批次结存、仓房结存（流水汇总）与盘点结果三处保持一致。
+        """
         stocktake = self.get_object()
-        items = list(stocktake.items.select_related("batch"))
+        items = list(stocktake.items.select_related("batch", "granary"))
         if not items:
             return Response({"detail": "盘点明细为空，请先生成明细"}, status=400)
         unfilled = [i for i in items if i.actual_quantity is None]
         if unfilled:
             return Response({"detail": f"还有 {len(unfilled)} 条明细未填写实盘数量"}, status=400)
 
-        for item in items:
-            diff = float(item.actual_quantity) - float(item.book_quantity)
-            item.gain_quantity = diff if diff > 0 else 0
-            item.loss_quantity = -diff if diff < 0 else 0
-            item.save()
+        operator = stocktake.leader
+        seq = 0
+        with transaction.atomic():
+            for item in items:
+                diff = round(float(item.actual_quantity) - float(item.book_quantity), 2)
+                item.gain_quantity = diff if diff > 0 else 0
+                item.loss_quantity = -diff if diff < 0 else 0
+                item.save()
+                if diff == 0:
+                    continue
+                seq += 1
+                StockRecord.objects.create(
+                    record_no=f"{stocktake.stocktake_no}-A{seq:02d}",
+                    granary=item.granary,
+                    batch=item.batch,
+                    direction=StockRecord.Direction.INBOUND if diff > 0 else StockRecord.Direction.OUTBOUND,
+                    biz_type=StockRecord.BizType.ADJUST_GAIN if diff > 0 else StockRecord.BizType.ADJUST_LOSS,
+                    quantity=abs(diff),
+                    unit_price=0,
+                    counterparty="库存盘点调账",
+                    operator=operator,
+                    remark=f"{stocktake.name} 盘点{'盘盈' if diff > 0 else '盘亏'}：{item.reason or '账实差异'}",
+                )
 
-        # 盘点调账：直接修正批次结存
-        for item in items:
-            if float(item.actual_quantity) != float(item.book_quantity):
-                batch = item.batch
-                batch.quantity = item.actual_quantity
-                batch.save(update_fields=["quantity"])
-
-        stocktake.status = Stocktake.Status.ADJUSTED
-        stocktake.save(update_fields=["status"])
+            stocktake.status = Stocktake.Status.ADJUSTED
+            stocktake.save(update_fields=["status"])
         return Response(StocktakeSerializer(stocktake).data)
 
 

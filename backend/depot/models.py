@@ -103,6 +103,8 @@ class OperationLog(models.Model):
         DELETE = "delete", "删除"
         STOCK_IN = "stock_in", "入库"
         STOCK_OUT = "stock_out", "出库"
+        STOCK_CORRECT = "stock_correct", "单据更正"
+        STOCK_VOID = "stock_void", "单据作废"
         FUMIGATION_ADVANCE = "fumigation_advance", "熏蒸状态推进"
         STOCKTAKE_GENERATE = "stocktake_generate", "生成盘点明细"
         STOCKTAKE_ADJUST = "stocktake_adjust", "盘点调账"
@@ -175,7 +177,7 @@ class Granary(TimeStampedModel):
         """当前结存数量（吨），由出入库流水汇总。"""
         from django.db.models import Case, DecimalField, F, Sum, When
 
-        total = self.stock_records.aggregate(
+        total = self.stock_records.filter(is_void=False).aggregate(
             q=Sum(
                 Case(
                     When(direction="in", then="quantity"),
@@ -333,6 +335,14 @@ class StockRecord(TimeStampedModel):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="created_stock_records", verbose_name="制单人",
     )
+    # 红冲作废（逻辑作废，原单保留）
+    is_void = models.BooleanField("是否作废", default=False, db_index=True)
+    void_reason = models.CharField("作废原因", max_length=200, blank=True)
+    voided_at = models.DateTimeField("作废时间", null=True, blank=True)
+    voided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="voided_stock_records", verbose_name="作废人",
+    )
 
     class Meta:
         verbose_name = "出入库记录"
@@ -341,13 +351,23 @@ class StockRecord(TimeStampedModel):
         db_table = "depot_stock_record"
 
     def __str__(self):
-        return f"{self.record_no} {self.get_direction_display()}{self.quantity}吨"
+        flag = "（已作废）" if self.is_void else ""
+        return f"{self.record_no} {self.get_direction_display()}{self.quantity}吨{flag}"
 
     @property
     def signed_quantity(self):
         """带符号数量：入库为正、出库为负。"""
         q = float(self.quantity)
         return q if self.direction == self.Direction.INBOUND else -q
+
+    @property
+    def is_adjustment(self):
+        """盘点调账系统单，不允许手工更正/作废。"""
+        return self.biz_type in (self.BizType.ADJUST_GAIN, self.BizType.ADJUST_LOSS)
+
+    @staticmethod
+    def _signed(direction, quantity):
+        return float(quantity) if direction == StockRecord.Direction.INBOUND else -float(quantity)
 
     @transaction.atomic
     def save(self, *args, **kwargs):
@@ -360,8 +380,7 @@ class StockRecord(TimeStampedModel):
             batch = GrainBatch.objects.select_for_update().get(pk=self.batch_id)
             delta = float(self.signed_quantity)
             if old and old.batch_id:
-                old_signed = float(old.quantity)
-                old_signed = old_signed if old.direction == self.Direction.INBOUND else -old_signed
+                old_signed = self._signed(old.direction, old.quantity)
                 if old.batch_id == batch.id:
                     delta -= old_signed
                 else:
@@ -369,6 +388,26 @@ class StockRecord(TimeStampedModel):
                     old_batch.quantity = max(0, float(old_batch.quantity) - old_signed)
                     old_batch.save(update_fields=["quantity"])
             batch.quantity = float(batch.quantity) + delta
+            batch.save(update_fields=["quantity"])
+        self._sync_granary_status()
+
+    @transaction.atomic
+    def void(self, reason, user):
+        """红冲作废：反向冲销批次结存，保留原单与操作痕迹。调用方需先做业务边界校验。"""
+        if self.is_void:
+            return
+        self.is_void = True
+        self.void_reason = reason or ""
+        self.voided_by = user
+        self.voided_at = timezone.now()
+        # 直接保存单据本身，不触发 save() 里的正向联动
+        super(StockRecord, self).save(update_fields=[
+            "is_void", "void_reason", "voided_at", "voided_by", "updated_at",
+        ])
+        if self.batch_id:
+            batch = GrainBatch.objects.select_for_update().get(pk=self.batch_id)
+            # 反向冲销原单影响
+            batch.quantity = float(batch.quantity) - float(self.signed_quantity)
             batch.save(update_fields=["quantity"])
         self._sync_granary_status()
 

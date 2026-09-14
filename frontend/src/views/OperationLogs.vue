@@ -77,15 +77,18 @@ const ACTIONS = [
   { value: 'delete', label: '删除' },
   { value: 'stock_in', label: '入库' },
   { value: 'stock_out', label: '出库' },
+  { value: 'stock_correct', label: '单据更正' },
+  { value: 'stock_void', label: '单据作废' },
   { value: 'fumigation_advance', label: '熏蒸状态推进' },
   { value: 'stocktake_generate', label: '生成盘点明细' },
   { value: 'stocktake_adjust', label: '盘点调账' },
 ]
 
 function actionType(a) {
-  if (['delete', 'stock_out', 'stocktake_adjust', 'login_fail'].includes(a)) return 'danger'
+  if (['delete', 'stock_out', 'stocktake_adjust', 'login_fail', 'stock_void'].includes(a)) return 'danger'
   if (['stock_in', 'create', 'stocktake_generate'].includes(a)) return 'success'
   if (['login', 'logout'].includes(a)) return 'info'
+  if (['stock_correct'].includes(a)) return 'primary'
   return 'warning'
 }
 function fmt(t) {

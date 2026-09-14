@@ -28,6 +28,7 @@ from .models import (
     UserProfile,
 )
 from .permissions import DepotPermission, can_access_granary, get_profile, is_director
+from .stock_locks import assert_non_negative, assert_record_mutable
 from .serializers import (
     FumigationTaskSerializer,
     GrainBatchSerializer,
@@ -134,11 +135,10 @@ class MonitorRecordViewSet(ScopedModelViewSet):
     scoped_create = True
 
     def perform_create(self, serializer):
-        super().perform_create(serializer)
-        # 检测人直接取登录身份
-        instance = serializer.instance
-        instance.inspector = actor_name(self.request.user)
-        instance.save(update_fields=["inspector"])
+        instance = serializer.save(created_by=self.request.user)
+        # 检测人直写，避免再次触发模型 save() 的告警定级
+        MonitorRecord.objects.filter(pk=instance.pk).update(inspector=actor_name(self.request.user))
+        instance.refresh_from_db(fields=["inspector"])
 
     @action(detail=False, methods=["get"])
     def latest(self, request):
@@ -162,16 +162,54 @@ class StockRecordViewSet(ScopedModelViewSet):
     search_fields = ["record_no", "counterparty", "operator"]
     audit_module = "出入库"
     scoped_create = True
+    http_method_names = ["get", "post", "put", "patch", "head", "options"]  # 不允许物理删除，统一走红冲
+    action_roles = {"void": WRITE_ROLES}
 
     def perform_create(self, serializer):
-        super().perform_create(serializer)
-        instance = serializer.instance
-        instance.operator = actor_name(self.request.user)
-        instance.save(update_fields=["operator"])
+        # save(created_by) 触发模型联动；经办人用 update 直写，避免二次联动
+        instance = serializer.save(created_by=self.request.user)
+        StockRecord.objects.filter(pk=instance.pk).update(operator=actor_name(self.request.user))
+        instance.refresh_from_db(fields=["operator"])
 
-    def perform_update(self, serializer):
-        serializer.validated_data["operator"] = actor_name(self.request.user)
-        super().perform_update(serializer)
+    def update(self, request, *args, **kwargs):
+        """更正单据：沿用模型 save() 的新旧差额联动，原经办人保持不变（改动由审计记录）。"""
+        partial = kwargs.pop("partial", False)
+        record = self.get_object()
+        serializer = self.get_serializer(record, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        before = (record.direction, float(record.quantity), record.batch_id, record.granary_id)
+        response = super().update(request, *args, partial=partial, **kwargs)
+        record.refresh_from_db()
+        after = (record.direction, float(record.quantity), record.batch_id, record.granary_id)
+        write_log(
+            request.user, OperationLog.Action.STOCK_CORRECT, "出入库",
+            str(record),
+            f"{before[0]}/{before[1]}吨/batch{before[2]} → {after[0]}/{after[1]}吨/batch{after[2]}",
+            request=request,
+        )
+        return response
+
+    @action(detail=True, methods=["post"])
+    def void(self, request, pk=None):
+        """红冲作废：反向冲销结存、保留原单、记录原因/操作人/时间。"""
+        record = self.get_object()
+        reason = (request.data.get("reason") or "").strip() if isinstance(request.data, dict) else ""
+        if not reason:
+            return Response({"detail": "作废必须填写原因"}, status=status.HTTP_400_BAD_REQUEST)
+        # 业务边界校验（熏蒸锁 / 盘点结账期 / 调账单 / 已作废）
+        assert_record_mutable(record)
+        # 作废后批次结存不能为负（冲销出库相当于回补不会负；冲销入库会减少结存）
+        assert_non_negative(
+            record.batch,
+            -float(record.signed_quantity),
+        )
+        with transaction.atomic():
+            record.void(reason=reason, user=request.user)
+        write_log(
+            request.user, OperationLog.Action.STOCK_VOID, "出入库",
+            str(record), f"红冲作废，原因：{reason}", request=request,
+        )
+        return Response(self.get_serializer(record).data)
 
     def create_action(self, instance):
         return OperationLog.Action.STOCK_IN if instance.direction == "in" else OperationLog.Action.STOCK_OUT
@@ -199,10 +237,9 @@ class FumigationTaskViewSet(ScopedModelViewSet):
         return obj.granary
 
     def perform_create(self, serializer):
-        super().perform_create(serializer)
-        instance = serializer.instance
-        instance.leader = actor_name(self.request.user)
-        instance.save(update_fields=["leader"])
+        instance = serializer.save(created_by=self.request.user)
+        FumigationTask.objects.filter(pk=instance.pk).update(leader=actor_name(self.request.user))
+        instance.refresh_from_db(fields=["leader"])
 
     def perform_update(self, serializer):
         # 负责人字段不允许通过编辑接口被篡改
@@ -259,10 +296,9 @@ class StocktakeViewSet(ScopedModelViewSet):
         return None
 
     def perform_create(self, serializer):
-        super().perform_create(serializer)
-        instance = serializer.instance
-        instance.leader = actor_name(self.request.user)
-        instance.save(update_fields=["leader"])
+        instance = serializer.save(created_by=self.request.user)
+        Stocktake.objects.filter(pk=instance.pk).update(leader=actor_name(self.request.user))
+        instance.refresh_from_db(fields=["leader"])
 
     @action(detail=True, methods=["post"])
     def generate_items(self, request, pk=None):

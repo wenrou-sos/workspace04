@@ -18,17 +18,18 @@
 
     <el-card>
       <div class="filter-bar">
-        <el-radio-group v-model="filters.direction" @change="loadData">
+        <el-radio-group v-model="filters.direction" @change="reload">
           <el-radio-button value="">全部</el-radio-button>
           <el-radio-button value="in">入库</el-radio-button>
           <el-radio-button value="out">出库</el-radio-button>
         </el-radio-group>
-        <el-select v-model="filters.granary" placeholder="仓房" clearable style="width: 150px" @change="loadData">
+        <el-select v-model="filters.granary" placeholder="仓房" clearable style="width: 150px" @change="reload">
           <el-option v-for="g in granaries" :key="g.id" :label="g.code" :value="g.id" />
         </el-select>
-        <el-select v-model="filters.biz_type" placeholder="业务类型" clearable style="width: 140px" @change="loadData">
-          <el-option v-for="b in BIZ_TYPE" :key="b.value" :label="b.label" :value="b.value" />
+        <el-select v-model="filters.biz_type" placeholder="业务类型" clearable style="width: 140px" @change="reload">
+          <el-option v-for="b in manualBizTypes" :key="b.value" :label="b.label" :value="b.value" />
         </el-select>
+        <el-checkbox v-model="hideVoid" @change="reload">隐藏已作废</el-checkbox>
         <el-date-picker
           v-model="dateRange"
           type="daterange"
@@ -43,43 +44,70 @@
           placeholder="单据号 / 对方单位 / 经办人"
           clearable
           style="width: 220px"
-          @keyup.enter="loadData"
-          @clear="loadData"
+          @keyup.enter="reload"
+          @clear="reload"
         />
-        <el-button type="primary" :icon="Search" @click="loadData">查询</el-button>
+        <el-button type="primary" :icon="Search" @click="reload">查询</el-button>
       </div>
 
-      <el-table :data="list" v-loading="loading" border stripe height="520">
-        <el-table-column prop="record_no" label="单据编号" width="150" />
-        <el-table-column label="方向" width="80">
+      <el-table
+        :data="hideVoid ? list.filter((r) => !r.is_void) : list"
+        v-loading="loading" border stripe height="520"
+        :row-class-name="rowClass"
+      >
+        <el-table-column label="状态" width="78">
           <template #default="{ row }">
-            <el-tag size="small" :type="findType(DIRECTION, row.direction)">
+            <el-tag v-if="row.is_void" type="danger" size="small">已作废</el-tag>
+            <el-tag v-else size="small" :type="findType(DIRECTION, row.direction)">
               {{ row.direction_display }}
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column prop="record_no" label="单据编号" width="150" />
         <el-table-column label="业务类型" width="100">
           <template #default="{ row }">{{ row.biz_type_display }}</template>
         </el-table-column>
-        <el-table-column prop="granary_code" label="仓号" width="80" />
+        <el-table-column prop="granary_code" label="仓号" width="72" />
         <el-table-column prop="batch_no" label="批次号" width="130" />
-        <el-table-column prop="quantity" label="数量(吨)" width="110" align="right">
+        <el-table-column prop="quantity" label="数量(吨)" width="100" align="right">
           <template #default="{ row }">
-            <strong :style="{ color: row.direction === 'in' ? '#2f8f6b' : '#cf1322' }">
+            <strong :class="row.is_void ? 'void-text' : (row.direction === 'in' ? 'qty-in' : 'qty-out')">
               {{ row.direction === 'in' ? '+' : '-' }}{{ row.quantity }}
             </strong>
           </template>
         </el-table-column>
-        <el-table-column prop="unit_price" label="单价(元/吨)" width="110" align="right" />
-        <el-table-column label="金额(元)" width="130" align="right">
+        <el-table-column prop="unit_price" label="单价" width="90" align="right" />
+        <el-table-column label="金额(元)" width="120" align="right">
           <template #default="{ row }">{{ row.amount?.toLocaleString() }}</template>
         </el-table-column>
-        <el-table-column prop="counterparty" label="对方单位" min-width="160" />
+        <el-table-column prop="counterparty" label="对方单位" min-width="150" show-overflow-tooltip />
         <el-table-column prop="operator" label="经办人" width="90" />
-        <el-table-column prop="occurred_at" label="时间" width="150">
+        <el-table-column prop="occurred_at" label="时间" width="148">
           <template #default="{ row }">{{ row.occurred_at.replace('T', ' ').slice(0, 16) }}</template>
         </el-table-column>
-        <el-table-column prop="remark" label="备注" min-width="120" />
+        <el-table-column label="操作" width="150" fixed="right">
+          <template #default="{ row }">
+            <el-tooltip v-if="!editable(row)" :content="lockReason(row)" placement="top">
+              <span>
+                <el-button link type="primary" size="small" disabled>更正</el-button>
+              </span>
+            </el-tooltip>
+            <el-button
+              v-else link type="primary" size="small"
+              @click="openDialog(row)"
+            >更正</el-button>
+
+            <el-tooltip v-if="!editable(row)" :content="lockReason(row)" placement="top">
+              <span>
+                <el-button link type="danger" size="small" disabled>作废</el-button>
+              </span>
+            </el-tooltip>
+            <el-button
+              v-else link type="danger" size="small"
+              @click="askVoidReason(row)"
+            >作废</el-button>
+          </template>
+        </el-table-column>
       </el-table>
 
       <el-pagination
@@ -93,7 +121,35 @@
       />
     </el-card>
 
-    <el-dialog v-model="dialogVisible" title="新增出入库单" width="640px">
+    <!-- 作废原因弹窗 -->
+    <el-dialog v-model="voidDialog" title="单据红冲作废" width="480px">
+      <el-alert
+        type="warning" :closable="false" class="mb16"
+        title="作废后原单保留并标记「已作废」，系统自动反向冲销批次结存与仓房状态，此操作不可撤销。"
+      />
+      <el-descriptions :column="1" border size="small" class="mb16">
+        <el-descriptions-item label="单据编号">{{ voidRow?.record_no }}</el-descriptions-item>
+        <el-descriptions-item label="内容">
+          {{ voidRow?.direction_display }}{{ voidRow?.quantity }}吨 · {{ voidRow?.granary_code }}
+        </el-descriptions-item>
+      </el-descriptions>
+      <el-input v-model="voidReason" type="textarea" :rows="3" maxlength="200" show-word-limit
+                placeholder="必须填写作废原因，将随原单永久保留" />
+      <template #footer>
+        <el-button @click="voidDialog = false">取消</el-button>
+        <el-button type="danger" :loading="voiding" :disabled="!voidReason.trim()" @click="confirmVoid">
+          确认作废
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 新增/更正弹窗 -->
+    <el-dialog v-model="dialogVisible" :title="editingId ? '更正出入库单' : '新增出入库单'" width="640px">
+      <el-alert
+        v-if="editingId"
+        type="info" :closable="false" class="mb16"
+        title="更正保存后，系统将按「新单影响 − 原单影响」的差额自动调整批次结存与仓房状态；原经办人保持不变，更正动作记入操作日志。"
+      />
       <el-form ref="formRef" :model="form" :rules="rules" label-width="110px">
         <el-form-item label="出入库方向" prop="direction">
           <el-radio-group v-model="form.direction" @change="onDirectionChange">
@@ -104,37 +160,31 @@
         <el-row :gutter="12">
           <el-col :span="12">
             <el-form-item label="单据编号" prop="record_no">
-              <el-input v-model="form.record_no" />
+              <el-input v-model="form.record_no" :disabled="!!editingId" />
             </el-form-item>
           </el-col>
           <el-col :span="12">
             <el-form-item label="业务类型" prop="biz_type">
               <el-select v-model="form.biz_type" style="width: 100%">
-                <el-option
-                  v-for="b in availableBizTypes"
-                  :key="b.value"
-                  :label="b.label"
-                  :value="b.value"
-                />
+                <el-option v-for="b in availableBizTypes" :key="b.value" :label="b.label" :value="b.value" />
               </el-select>
             </el-form-item>
           </el-col>
           <el-col :span="12">
             <el-form-item label="仓房" prop="granary">
-              <el-select v-model="form.granary" style="width: 100%" @change="loadBatches">
-                <el-option v-for="g in selectableGranaries" :key="g.id" :label="`${g.code} ${g.name}`" :value="g.id" />
+              <el-select v-model="form.granary" style="width: 100%" @change="loadBatches"
+                         :disabled="!!editingId">
+                <el-option v-for="g in selectableGranaries" :key="g.id"
+                           :label="`${g.code} ${g.name}`" :value="g.id" />
               </el-select>
             </el-form-item>
           </el-col>
           <el-col :span="12">
             <el-form-item label="粮油批次" prop="batch">
-              <el-select v-model="form.batch" style="width: 100%" placeholder="请选择批次（新粮请先在库存粮情中登记批次）">
-                <el-option
-                  v-for="b in batches"
-                  :key="b.id"
-                  :label="`${b.batch_no} ${b.grain_kind_display} 结存${b.quantity}吨`"
-                  :value="b.id"
-                />
+              <el-select v-model="form.batch" style="width: 100%">
+                <el-option v-for="b in batches" :key="b.id"
+                           :label="`${b.batch_no} ${b.grain_kind_display} 结存${b.quantity}吨`"
+                           :value="b.id" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -155,12 +205,13 @@
           </el-col>
           <el-col :span="12">
             <el-form-item label="经办人">
-              <el-input :model-value="auth.displayName" disabled />
+              <el-input :model-value="editingId ? editingOperator : auth.displayName" disabled />
             </el-form-item>
           </el-col>
           <el-col :span="24">
-            <el-form-item label="出入库时间">
-              <el-date-picker v-model="form.occurred_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss" style="width: 100%" />
+            <el-form-item label="出入库时间" prop="occurred_at">
+              <el-date-picker v-model="form.occurred_at" type="datetime"
+                              value-format="YYYY-MM-DDTHH:mm:ss" style="width: 100%" />
             </el-form-item>
           </el-col>
           <el-col :span="24">
@@ -171,20 +222,18 @@
         </el-row>
         <el-alert
           v-if="selectedBatch && form.direction === 'out' && form.quantity > Number(selectedBatch.quantity)"
-          type="error"
-          :closable="false"
-          :title="`出库数量超过批次结存 ${selectedBatch.quantity} 吨，无法提交`"
+          type="error" :closable="false"
+          :title="`出库数量超过批次当前结存 ${selectedBatch.quantity} 吨，无法保存`"
           class="mb16"
         />
-        <el-alert
-          type="info"
-          :closable="false"
-          title="保存后系统自动更新批次结存数量与仓房状态"
-        />
+        <el-alert type="info" :closable="false"
+                  title="熏蒸作业期间及已完成盘点结账期间的单据不能更正或作废（后端强制校验）" />
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+        <el-button type="primary" :loading="saving" @click="save">
+          {{ editingId ? '保存更正' : '保存' }}
+        </el-button>
       </template>
     </el-dialog>
   </div>
@@ -205,22 +254,45 @@ const batches = ref([])
 const loading = ref(false)
 const filters = reactive({ direction: '', granary: '', biz_type: '', search: '' })
 const dateRange = ref(null)
+const hideVoid = ref(false)
 const page = ref(1)
 const pageSize = 50
 const total = ref(0)
 
+// 盘盈/盘亏调账单由盘点流程生成，不在手工业务类型下拉中出现
+const ADJUST_TYPES = ['adjust_gain', 'adjust_loss']
+const manualBizTypes = BIZ_TYPE.filter((b) => !ADJUST_TYPES.includes(b.value))
+
 const stats = computed(() => {
-  const inbound = list.value.filter((r) => r.direction === 'in').reduce((s, r) => s + Number(r.quantity), 0)
-  const outbound = list.value.filter((r) => r.direction === 'out').reduce((s, r) => s + Number(r.quantity), 0)
-  const inCount = list.value.filter((r) => r.direction === 'in').length
-  const outCount = list.value.filter((r) => r.direction === 'out').length
+  const valid = list.value.filter((r) => !r.is_void)
+  const inbound = valid.filter((r) => r.direction === 'in').reduce((s, r) => s + Number(r.quantity), 0)
+  const outbound = valid.filter((r) => r.direction === 'out').reduce((s, r) => s + Number(r.quantity), 0)
+  const voided = list.value.filter((r) => r.is_void).length
   return [
-    { label: '本页入库', value: `${inCount} 单 / ${inbound.toFixed(1)} 吨`, color: '#2f8f6b' },
-    { label: '本页出库', value: `${outCount} 单 / ${outbound.toFixed(1)} 吨`, color: '#cf1322' },
+    { label: '有效入库', value: `${inbound.toFixed(1)} 吨`, color: '#2f8f6b' },
+    { label: '有效出库', value: `${outbound.toFixed(1)} 吨`, color: '#cf1322' },
     { label: '净变动', value: `${(inbound - outbound).toFixed(1)} 吨`, color: '#b8860b' },
-    { label: '记录总数', value: `${total.value} 条`, color: '#3b7dd8' },
+    { label: '已作废单据', value: `${voided} 张`, color: '#909399' },
   ]
 })
+
+function rowClass({ row }) {
+  return row.is_void ? 'void-row' : ''
+}
+
+/** 是否允许更正/作废：有写权限、非调账单、未作废、本仓可操作 */
+function editable(row) {
+  if (!auth.canWrite() || row.is_void || ADJUST_TYPES.includes(row.biz_type)) return false
+  return auth.canAccessGranary(row.granary)
+}
+/** 不可操作时的原因提示 */
+function lockReason(row) {
+  if (!auth.canWrite()) return '只读账号无操作权限'
+  if (ADJUST_TYPES.includes(row.biz_type)) return '盘点调账单由系统生成，不能更正或作废'
+  if (row.is_void) return '该单据已作废'
+  if (!auth.canAccessGranary(row.granary)) return '非本人管辖仓房'
+  return '该单据已进入盘点结账或熏蒸作业期间'
+}
 
 async function loadData() {
   loading.value = true
@@ -246,62 +318,42 @@ async function loadData() {
     loading.value = false
   }
 }
-
+function reload() {
+  page.value = 1
+  loadData()
+}
 function onPage(p) {
   page.value = p
   loadData()
 }
 
-// ---- 新增 ----
+// ---- 新增 / 更正 ----
 const dialogVisible = ref(false)
 const saving = ref(false)
 const formRef = ref()
+const editingId = ref(null)
+const editingOperator = ref('')
 const emptyForm = () => ({
-  direction: 'in',
-  record_no: '',
-  biz_type: 'purchase',
-  granary: null,
-  batch: null,
-  quantity: 50,
-  unit_price: 0,
-  counterparty: '',
-  operator: '',
-  occurred_at: new Date().toISOString().slice(0, 19),
-  remark: '',
+  direction: 'in', record_no: '', biz_type: 'purchase', granary: null, batch: null,
+  quantity: 50, unit_price: 0, counterparty: '',
+  occurred_at: new Date().toISOString().slice(0, 19), remark: '',
 })
 const form = reactive(emptyForm())
 const rules = {
-  direction: [{ required: true }],
   record_no: [{ required: true, message: '请输入单据编号', trigger: 'blur' }],
   biz_type: [{ required: true, message: '请选择业务类型', trigger: 'change' }],
   granary: [{ required: true, message: '请选择仓房', trigger: 'change' }],
   batch: [{ required: true, message: '请选择批次', trigger: 'change' }],
   quantity: [{ required: true, message: '请输入数量', trigger: 'blur' }],
+  occurred_at: [{ required: true, message: '请选择时间', trigger: 'change' }],
 }
-
-const selectableGranaries = computed(() =>
-  granaries.value.filter((g) => auth.canAccessGranary(g.id))
-)
-
 const IN_BIZ = ['purchase', 'transfer_in', 'return']
 const OUT_BIZ = ['sale', 'transfer_out', 'loss', 'process']
 const availableBizTypes = computed(() =>
-  BIZ_TYPE.filter((b) => (form.direction === 'in' ? IN_BIZ.includes(b.value) : OUT_BIZ.includes(b.value)))
+  manualBizTypes.filter((b) => (form.direction === 'in' ? IN_BIZ.includes(b.value) : OUT_BIZ.includes(b.value)))
 )
+const selectableGranaries = computed(() => granaries.value.filter((g) => auth.canAccessGranary(g.id)))
 const selectedBatch = computed(() => batches.value.find((b) => b.id === form.batch))
-
-function onDirectionChange() {
-  form.biz_type = form.direction === 'in' ? 'purchase' : 'sale'
-  form.batch = null
-  batches.value = []
-}
-
-async function loadBatches() {
-  form.batch = null
-  if (!form.granary) return
-  const res = await batchApi.list({ granary: form.granary, page_size: 100 })
-  batches.value = res.results ?? res
-}
 
 function genRecordNo() {
   const d = new Date()
@@ -309,24 +361,80 @@ function genRecordNo() {
   const prefix = form.direction === 'in' ? 'RK' : 'CK'
   return `${prefix}${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}`
 }
-
-function openDialog() {
-  Object.assign(form, emptyForm())
-  form.record_no = genRecordNo()
-  dialogVisible.value = true
+function onDirectionChange() {
+  form.biz_type = form.direction === 'in' ? 'purchase' : 'sale'
+  form.batch = null
   batches.value = []
+  if (!editingId.value) form.record_no = genRecordNo()
+}
+async function loadBatches() {
+  form.batch = null
+  if (!form.granary) return
+  const res = await batchApi.list({ granary: form.granary, page_size: 100 })
+  batches.value = res.results ?? res
+}
+
+function openDialog(row) {
+  Object.assign(form, emptyForm())
+  batches.value = []
+  editingId.value = null
+  if (row) {
+    // 更正：回填原单
+    editingId.value = row.id
+    editingOperator.value = row.operator
+    Object.assign(form, {
+      direction: row.direction, record_no: row.record_no, biz_type: row.biz_type,
+      granary: row.granary, batch: row.batch, quantity: Number(row.quantity),
+      unit_price: Number(row.unit_price), counterparty: row.counterparty,
+      occurred_at: row.occurred_at, remark: row.remark || '',
+    })
+    loadBatches().then(() => { form.batch = row.batch })
+  } else {
+    form.record_no = genRecordNo()
+  }
+  dialogVisible.value = true
 }
 
 async function save() {
   await formRef.value.validate()
   saving.value = true
   try {
-    await stockApi.create({ ...form })
-    ElMessage.success('出入库单已保存，结存已联动更新')
+    const payload = { ...form }
+    if (editingId.value) {
+      await stockApi.update(editingId.value, payload)
+      ElMessage.success('单据已更正，批次结存与仓房状态已按差额联动')
+    } else {
+      await stockApi.create(payload)
+      ElMessage.success('出入库单已保存，结存已联动更新')
+    }
     dialogVisible.value = false
     loadData()
   } finally {
     saving.value = false
+  }
+}
+
+// ---- 红冲作废 ----
+const voidDialog = ref(false)
+const voidRow = ref(null)
+const voidReason = ref('')
+const voiding = ref(false)
+// el-popconfirm 不便收原因，改为打开原因弹窗
+function askVoidReason(row) {
+  voidRow.value = row
+  voidReason.value = ''
+  voidDialog.value = true
+}
+async function confirmVoid() {
+  if (!voidReason.value.trim()) return
+  voiding.value = true
+  try {
+    await stockApi.void(voidRow.value.id, voidReason.value.trim())
+    ElMessage.success('单据已红冲作废，结存已反向冲销')
+    voidDialog.value = false
+    loadData()
+  } finally {
+    voiding.value = false
   }
 }
 
@@ -354,5 +462,25 @@ onMounted(async () => {
 .pager {
   margin-top: 14px;
   justify-content: flex-end;
+}
+.qty-in {
+  color: #2f8f6b;
+}
+.qty-out {
+  color: #cf1322;
+}
+.void-text {
+  color: #909399;
+  text-decoration: line-through;
+}
+:deep(.void-row) {
+  background: #fafafa !important;
+  color: #909399;
+}
+:deep(.void-row td) {
+  text-decoration: line-through;
+}
+:deep(.void-row .el-tag) {
+  text-decoration: none;
 }
 </style>

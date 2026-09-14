@@ -88,6 +88,7 @@ export const stockApi = {
   create: (data) => api.post('/stock-records/', data),
   update: (id, data) => api.put(`/stock-records/${id}/`, data),
   remove: (id) => api.delete(`/stock-records/${id}/`),
+  void: (id, reason) => api.post(`/stock-records/${id}/void/`, { reason }),
 }
 
 // ---- 熏蒸 ----

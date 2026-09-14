@@ -60,23 +60,77 @@ class StockRecordSerializer(serializers.ModelSerializer):
     batch_no = serializers.CharField(source="batch.batch_no", read_only=True, allow_null=True)
     signed_quantity = serializers.FloatField(read_only=True)
     amount = serializers.SerializerMethodField()
+    voided_by_name = serializers.CharField(source="voided_by.profile.display_name", read_only=True, default=None)
 
     class Meta:
         model = StockRecord
         fields = "__all__"
-        read_only_fields = ("operator", "created_by")
+        read_only_fields = (
+            "operator", "created_by", "is_void", "void_reason",
+            "voided_at", "voided_by",
+        )
 
     def get_amount(self, obj):
         return round(float(obj.quantity) * float(obj.unit_price), 2)
 
     def validate(self, attrs):
-        if attrs.get("direction") == StockRecord.Direction.OUTBOUND:
-            batch = attrs.get("batch")
-            qty = float(attrs.get("quantity", 0))
-            if batch and qty > float(batch.quantity):
-                raise serializers.ValidationError(
-                    f"出库数量 {qty} 吨超过批次结存 {float(batch.quantity)} 吨"
-                )
+        from .stock_locks import (
+            assert_granary_open,
+            assert_non_negative,
+            assert_record_mutable,
+        )
+
+        instance = self.instance  # None=新增，否则为更正
+        data = attrs
+
+        direction = data.get("direction") or (instance.direction if instance else None)
+        quantity = data.get("quantity")
+        if quantity is not None:
+            quantity = float(quantity)
+            if quantity <= 0:
+                raise serializers.ValidationError("数量必须大于 0")
+        batch = data.get("batch")
+        granary = data.get("granary")
+        occurred_at = data.get("occurred_at") or (instance.occurred_at if instance else None)
+
+        if instance is None:
+            # ---- 新增 ----
+            if batch is None:
+                raise serializers.ValidationError({"batch": "请选择批次"})
+            if granary is None:
+                granary = batch.granary
+                data["granary"] = granary
+            if batch.granary_id != granary.id:
+                raise serializers.ValidationError({"batch": "所选批次不属于该仓房"})
+            # 盘盈/盘亏只能由盘点流程生成
+            if data.get("biz_type") in (StockRecord.BizType.ADJUST_GAIN, StockRecord.BizType.ADJUST_LOSS):
+                raise serializers.ValidationError({"biz_type": "盘盈/盘亏调整单由盘点流程自动生成"})
+            assert_granary_open(granary)
+            if direction == StockRecord.Direction.OUTBOUND and quantity is not None:
+                assert_non_negative(batch, -quantity)
+        else:
+            # ---- 更正：系统调账单与已作废单锁定 ----
+            request = self.context.get("request")
+            new_batch = batch if batch is not None else instance.batch
+            new_granary = granary if granary is not None else instance.granary
+            new_direction = direction
+            new_occurred_at = occurred_at
+            # 保管员不能把单据更正到自己管辖范围之外的仓房/批次
+            if request is not None and not request.user.is_superuser:
+                from .permissions import can_access_granary
+                if not can_access_granary(request.user, new_granary):
+                    raise serializers.ValidationError({"granary": "无权将单据更正到非本人管辖的仓房"})
+            assert_record_mutable(instance, new_occurred_at, new_granary, new_batch)
+            if new_batch.granary_id != new_granary.id:
+                raise serializers.ValidationError({"batch": "所选批次不属于该仓房"})
+
+            new_qty = float(quantity if quantity is not None else instance.quantity)
+            new_signed = float(new_qty) if new_direction == "in" else -float(new_qty)
+            # 扣除原单影响后，新影响下的批次结存不得为负
+            assert_non_negative(new_batch, new_signed, exclude_record=instance)
+            # 若换了批次，旧批次冲销原单后也不应为负（正常只会减少出库/增入库，理论非负，做防御）
+            if instance.batch_id and new_batch.id != instance.batch_id:
+                assert_non_negative(instance.batch, -float(instance.signed_quantity))
         return attrs
 
 
